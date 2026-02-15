@@ -18,6 +18,8 @@ class _NumpyEncoder(json.JSONEncoder):
     """JSON encoder that handles numpy numeric types."""
 
     def default(self, obj):
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
         if isinstance(obj, (np.floating,)):
             return float(obj)
         if isinstance(obj, (np.integer,)):
@@ -139,7 +141,7 @@ def write_report_json(
             "chapter": clip.chapter,
             "total_score": round(clip.total_score, 4),
             "selection_reason": clip.selection_reason,
-            "is_highlight": clip.shot.highlight_score >= 0.5,
+            "is_highlight": bool(clip.shot.highlight_score >= 0.5),
             "highlight_score": round(clip.shot.highlight_score, 4),
             "highlight_reason": clip.shot.highlight_reason,
             "quality": {

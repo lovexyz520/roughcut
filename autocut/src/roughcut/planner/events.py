@@ -179,6 +179,53 @@ def get_event_shots(shots: list[Shot], event_id: int) -> list[Shot]:
     return [s for s in shots if s.event_id == event_id]
 
 
+def sort_events_chronological(summaries: list[EventSummary]) -> list[EventSummary]:
+    """Sort events by time_range (earliest first) for chronological narrative."""
+    def _time_key(es: EventSummary) -> str:
+        if es.time_range == "unknown":
+            return "99:99"
+        return es.time_range.split(" - ")[0]
+
+    return sorted(summaries, key=_time_key)
+
+
+def sort_events_by_energy(summaries: list[EventSummary]) -> list[EventSummary]:
+    """Sort events by emotion intensity (low→high) for energy-first narrative."""
+    return sorted(summaries, key=lambda s: s.emotion_intensity)
+
+
+def order_events_for_narrative(
+    summaries: list[EventSummary],
+    mode: str = "chronological",
+) -> list[EventSummary]:
+    """Order events based on narrative mode.
+
+    Args:
+        summaries: Ranked event summaries.
+        mode: "chronological" (time order), "energy_first" (low→high energy),
+              or "hybrid" (chronological with energy boost at middle).
+
+    Returns:
+        Ordered event summaries.
+    """
+    if mode == "energy_first":
+        return sort_events_by_energy(summaries)
+
+    if mode == "hybrid":
+        # Chronological order, but move highest-energy event to ~60% position
+        chrono = sort_events_chronological(summaries)
+        if len(chrono) >= 3:
+            # Find highest energy event
+            max_idx = max(range(len(chrono)), key=lambda i: chrono[i].emotion_intensity)
+            peak = chrono.pop(max_idx)
+            insert_pos = int(len(chrono) * 0.6)
+            chrono.insert(insert_pos, peak)
+        return chrono
+
+    # Default: chronological
+    return sort_events_chronological(summaries)
+
+
 def build_event_arc(event_shots: list[Shot]) -> dict[str, list[Shot]]:
     """Organize shots within an event into an arc structure.
 

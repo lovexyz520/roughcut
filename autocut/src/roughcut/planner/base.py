@@ -18,6 +18,7 @@ from roughcut.models import (
 from roughcut.planner.events import (
     build_event_arc,
     get_event_shots,
+    order_events_for_narrative,
     rank_events,
     summarize_events,
 )
@@ -247,9 +248,13 @@ class TemplatePlanner(ABC):
         video_used = 0.0
         photo_used = 0.0
 
-        # Event ranking
+        # Event ranking and narrative ordering
         event_summaries = summarize_events(shots)
         ranked_events = rank_events(event_summaries)
+        ranked_events = order_events_for_narrative(
+            ranked_events, self.config.narrative_mode
+        )
+        logger.info("Narrative mode: %s", self.config.narrative_mode)
         all_event_ids = {s.event_id for s in shots if s.event_id >= 0}
         used_event_ids: set[int] = set()
         global_source_usage: dict[str, int] = {}

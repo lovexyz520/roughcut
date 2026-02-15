@@ -231,6 +231,7 @@ class ProjectConfig:
     rhythm: RhythmConfig = field(default_factory=RhythmConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     diversity: DiversityConfig = field(default_factory=DiversityConfig)
+    narrative_mode: str = "chronological"  # chronological | energy_first | hybrid
     seed: int | None = None
 
     @classmethod
@@ -280,5 +281,6 @@ class ProjectConfig:
                 same_angle_penalty=d.get("same_angle_penalty", 0.10),
                 chapter_repeat_penalty=d.get("chapter_repeat_penalty", 0.20),
             )
+        config.narrative_mode = data.get("narrative_mode", config.narrative_mode)
         config.seed = data.get("seed")
         return config

@@ -5,6 +5,7 @@ clip_duration_sec:
   min: 1.5
   max: 6.0
 max_same_event_streak_sec: 20
+narrative_mode: chronological  # chronological | energy_first | hybrid
 music:
   mode: single
   file: ""  # Leave empty to auto-select from input folder
