@@ -138,7 +138,12 @@ def _add_markers(
     sequence: ET.Element,
     timeline: Timeline,
 ) -> None:
-    """Add chapter and event markers to the sequence."""
+    """Add three-layer markers to the sequence.
+
+    Layer 1 (Blue): Chapter markers
+    Layer 2 (Green): Event markers
+    Layer 3 (Red): Highlight markers with why_selected
+    """
     # Chapter markers
     chapters_seen: set[str] = set()
     for clip in timeline.clips:
@@ -163,6 +168,22 @@ def _add_markers(
             ET.SubElement(marker, "in").text = str(_seconds_to_frames(clip.timeline_start))
             ET.SubElement(marker, "out").text = "-1"
             ET.SubElement(marker, "color").text = "Green"
+
+    # Highlight markers (mark clips with high highlight score)
+    for clip in timeline.clips:
+        if clip.shot.highlight_score >= 0.5:
+            marker = ET.SubElement(sequence, "marker")
+            reason = clip.shot.highlight_reason or "highlight"
+            ET.SubElement(marker, "name").text = f"Highlight: {reason}"
+            comment = (
+                f"{clip.shot.source.path.name} | "
+                f"score={clip.total_score:.3f} | "
+                f"{clip.selection_reason}"
+            )
+            ET.SubElement(marker, "comment").text = comment
+            ET.SubElement(marker, "in").text = str(_seconds_to_frames(clip.timeline_start))
+            ET.SubElement(marker, "out").text = "-1"
+            ET.SubElement(marker, "color").text = "Red"
 
 
 def _build_alt_track(

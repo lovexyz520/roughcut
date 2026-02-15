@@ -166,8 +166,8 @@ def _detect_sections(
         bound_times = librosa.frames_to_time(bound_frames, sr=sr, hop_length=512)
         bound_times = np.unique(bound_times)
 
-        # Filter: merge very short sections (< 4 seconds)
-        bound_times = _merge_short_boundaries(bound_times, duration, min_sec=4.0)
+        # Filter: merge very short sections (< 6 seconds for stability)
+        bound_times = _merge_short_boundaries(bound_times, duration, min_sec=6.0)
 
     except Exception as e:
         logger.warning("Section detection failed, using energy-based fallback: %s", e)

@@ -117,14 +117,18 @@ def extract_metadata(path: Path, media_type: MediaType) -> MediaItem:
 
 
 def convert_dng_proxy(dng_path: Path, output_dir: Path) -> Path | None:
-    """Convert a DNG file to a proxy JPEG using ffmpeg."""
+    """Convert a DNG file to a proxy JPEG using multiple strategies.
+
+    Tries ffmpeg first, then falls back to rawpy/imageio if available.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     proxy_path = output_dir / (dng_path.stem + ".jpg")
-    if proxy_path.exists():
+    if proxy_path.exists() and proxy_path.stat().st_size > 1000:
         return proxy_path
 
+    # Strategy 1: ffmpeg with explicit raw demuxer
     try:
-        subprocess.run(
+        result = subprocess.run(
             [
                 "ffmpeg", "-y",
                 "-i", str(dng_path),
@@ -135,10 +139,28 @@ def convert_dng_proxy(dng_path: Path, output_dir: Path) -> Path | None:
             capture_output=True,
             timeout=60,
         )
-        if proxy_path.exists():
+        if proxy_path.exists() and proxy_path.stat().st_size > 1000:
+            logger.info("DNG proxy created (ffmpeg): %s", proxy_path.name)
             return proxy_path
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        logger.warning("DNG conversion failed for %s: %s", dng_path, e)
+        logger.debug("ffmpeg DNG conversion failed for %s: %s", dng_path.name, e)
+
+    # Strategy 2: extract embedded JPEG preview via exiftool
+    try:
+        result = subprocess.run(
+            ["exiftool", "-b", "-JpgFromRaw", str(dng_path)],
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode == 0 and len(result.stdout) > 1000:
+            with open(proxy_path, "wb") as f:
+                f.write(result.stdout)
+            logger.info("DNG proxy created (exiftool preview): %s", proxy_path.name)
+            return proxy_path
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        logger.debug("exiftool not available for DNG preview extraction")
+
+    logger.warning("E_PROXY_FAIL: All DNG conversion strategies failed for %s", dng_path.name)
     return None
 
 

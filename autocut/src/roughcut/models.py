@@ -85,6 +85,8 @@ class Shot:
     shot_index: int = 0
     event_id: int = -1      # Assigned by event segmentation
     shot_role: str = ""      # Assigned by shot_role classifier
+    highlight_score: float = 0.0    # 0-1, higher = more memorable moment
+    highlight_reason: str = ""       # Why this is a highlight
 
     @property
     def duration_sec(self) -> float:

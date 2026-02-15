@@ -28,15 +28,15 @@ def build_clip_command(
     fps = output_config.fps
 
     if clip.shot.source.is_photo:
-        # Photo: use proxy if available, otherwise original
-        source_path = clip.shot.source.proxy_path or clip.shot.source.path
+        # Photo: DNG must use proxy; other formats use proxy if available
+        if clip.shot.source.path.suffix.lower() == ".dng":
+            if not clip.shot.source.proxy_path:
+                logger.warning("Skipping DNG without proxy: %s", clip.shot.source.path.name)
+                return None
+            source_path = clip.shot.source.proxy_path
+        else:
+            source_path = clip.shot.source.proxy_path or clip.shot.source.path
         abs_path = _resolve_path(source_path)
-
-        # For DNG without proxy, try direct ffmpeg decode first;
-        # if the extension is .dng and no proxy exists, skip (ffmpeg can't decode most DNG)
-        if source_path.suffix.lower() == ".dng":
-            logger.warning("Skipping DNG without proxy: %s", source_path.name)
-            return None
 
         # Photo -> video with Ken Burns zoompan
         kb = random_ken_burns(clip.timeline_duration)

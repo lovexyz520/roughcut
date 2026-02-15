@@ -139,6 +139,9 @@ def write_report_json(
             "chapter": clip.chapter,
             "total_score": round(clip.total_score, 4),
             "selection_reason": clip.selection_reason,
+            "is_highlight": clip.shot.highlight_score >= 0.5,
+            "highlight_score": round(clip.shot.highlight_score, 4),
+            "highlight_reason": clip.shot.highlight_reason,
             "quality": {
                 "sharpness": round(clip.shot.quality.sharpness, 4),
                 "exposure": round(clip.shot.quality.exposure, 4),
@@ -264,6 +267,62 @@ def write_rejected_csv(
     return output_path
 
 
+def write_story_notes(
+    timeline: Timeline,
+    all_shots: list[Shot],
+    output_path: Path,
+) -> Path:
+    """Write story_notes.md: chapter summaries and suggested replacement points."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    chapters = timeline.get_chapters()
+    event_summaries = summarize_events(all_shots)
+    event_map = {es.event_id: es for es in event_summaries}
+
+    lines = ["# Story Notes\n"]
+    lines.append(f"Total duration: {timeline.duration:.1f}s, {len(timeline.clips)} clips\n\n")
+
+    for ch_name, ch_clips in chapters.items():
+        lines.append(f"## {ch_name}\n")
+        ch_dur = sum(c.timeline_duration for c in ch_clips)
+        lines.append(f"- Duration: {ch_dur:.1f}s, {len(ch_clips)} clips\n")
+
+        # Events used in this chapter
+        ch_events = {c.shot.event_id for c in ch_clips}
+        for eid in sorted(ch_events):
+            es = event_map.get(eid)
+            if es:
+                lines.append(f"- Event {eid}: {es.time_range} ({es.shot_count} shots)\n")
+
+        # Highlights in chapter
+        highlights = [c for c in ch_clips if c.shot.highlight_score >= 0.5]
+        if highlights:
+            lines.append(f"- Highlights: {len(highlights)}\n")
+            for h in highlights[:3]:
+                lines.append(
+                    f"  - {h.shot.source.path.name} @ {h.timeline_start:.1f}s "
+                    f"({h.shot.highlight_reason})\n"
+                )
+
+        # Suggest replacement points (lowest score clips)
+        sorted_clips = sorted(ch_clips, key=lambda c: c.total_score)
+        weakest = sorted_clips[:2]
+        if weakest:
+            lines.append("- Suggested replacements:\n")
+            for w in weakest:
+                lines.append(
+                    f"  - {w.shot.source.path.name} @ {w.timeline_start:.1f}s "
+                    f"(score={w.total_score:.3f})\n"
+                )
+        lines.append("\n")
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+    logger.info("Story notes written: %s", output_path)
+    return output_path
+
+
 def write_all_reports(
     timeline: Timeline,
     all_shots: list[Shot],
@@ -275,3 +334,4 @@ def write_all_reports(
     write_report_json(timeline, all_shots, report_dir / "report.json", beat_info)
     write_selected_csv(timeline, report_dir / "selected_clips.csv")
     write_rejected_csv(all_shots, timeline, report_dir / "rejected_clips.csv")
+    write_story_notes(timeline, all_shots, report_dir / "story_notes.md")

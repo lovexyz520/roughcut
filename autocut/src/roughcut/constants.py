@@ -41,3 +41,15 @@ FCP7_NTSC = False
 
 # Logging
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+
+# --- Error codes ---
+class ErrorCode:
+    """Exit codes for CLI error reporting."""
+
+    SUCCESS = 0
+    E_NO_USABLE_MEDIA = 10
+    E_MUSIC_NOT_FOUND = 11
+    E_PROXY_FAIL = 12
+    E_RENDER_FAIL = 20
+    E_EXPORT_FAIL = 21

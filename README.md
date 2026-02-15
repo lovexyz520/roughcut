@@ -220,6 +220,43 @@ uv run pytest tests/ -v
 | 6. Premiere 輸出 | 章節/事件標記、V2 備選軌、排除原因 | `export/premiere_xml.py`, `report/writer.py` |
 | 7. 測試與交付 | 70 項單元測試、交付文件 | `tests/` |
 
+## V3 變更摘要（故事感升級）
+
+核心升級：從「高分片段排序器」→「事件與情緒驅動的故事剪輯器」
+
+| 任務 | 內容 | 關鍵檔案 |
+|------|------|----------|
+| 0. 必修修復 | DNG proxy 多策略轉換、片長補齊(backfill)、錯誤碼(ErrorCode) | `constants.py`, `scanner.py`, `pipeline.py`, `draft.py`, `base.py` |
+| 1. 事件導向規劃 | Event Ranking、Chapter 配事件配額、Event Arc (establishing→action→reaction→detail) | `planner/events.py`, `planner/base.py` |
+| 2. 高光偵測 | highlight_score (笑容/互動/注視/動作)、chorus 段加分 | `analyze/highlights.py`, `models.py`, `planner/base.py` |
+| 3. 敘事時間軸 | 時間前進性(growth)、行程節點(travel) | `planner/growth.py`, `planner/travel.py` |
+| 4. 剪輯語法引擎 | 禁止連續同景別、高動態插入緩衝、章節語意化轉場 | `planner/grammar.py` |
+| 5. 音樂敘事對齊 | section 穩定化、section-level mapping (intro→establishing, chorus→highlight) | `analyze/beat.py`, `planner/base.py` |
+| 6. 人在迴圈升級 | review 事件級操作、favorites/exclude 支援 event_id、story_notes.md | `pipeline.py`, `report/writer.py` |
+| 7. Premiere 交接 | 三層標記(chapter/event/highlight)、marker 含 why_selected | `export/premiere_xml.py` |
+
+### V3 新增輸出
+
+```
+output/
+  report/
+    story_notes.md          # 每章摘要 + 建議替換點
+  review/
+    events.csv              # 事件級摘要（可標記 keep/drop）
+```
+
+### favorites/exclude 新語法
+
+```text
+# 支援 event_id（以 event: 開頭）
+event:0  (5 shots, 10:03 - 10:28)
+event:2  (3 shots, 03:28 - 03:30)
+
+# 也支援檔名
+IMG_0827.MOV
+IMG_3858.MOV
+```
+
 ## 後續規劃
 
 - M2：加入旅遊模板 GPS/地點連續性規則
