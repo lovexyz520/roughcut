@@ -22,6 +22,7 @@ from roughcut.planner.events import (
     rank_events,
     summarize_events,
 )
+from roughcut.planner.preference import UserProfile
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +30,15 @@ logger = logging.getLogger(__name__)
 class TemplatePlanner(ABC):
     """Abstract base class for story template planners."""
 
-    def __init__(self, config: ProjectConfig, beat_info: BeatInfo | None = None):
+    def __init__(
+        self,
+        config: ProjectConfig,
+        beat_info: BeatInfo | None = None,
+        user_profile: UserProfile | None = None,
+    ):
         self.config = config
         self.beat_info = beat_info
+        self.user_profile = user_profile
         if config.seed is not None:
             random.seed(config.seed)
 
@@ -92,21 +99,40 @@ class TemplatePlanner(ABC):
         if q.stability < 0.3:
             penalties += 0.1  # Too shaky
 
-        return max(0.0, total + highlight_bonus - penalties)
+        # User preference bias
+        pref_adj = 0.0
+        if self.user_profile:
+            pref_adj = self.user_profile.score_adjustment(shot)
+
+        return max(0.0, total + highlight_bonus + pref_adj - penalties)
 
     def story_fit(self, shot: Shot, chapter: Chapter) -> float:
         """Evaluate how well a shot fits a chapter. Override in subclasses."""
         return 0.5
 
+    # Section → preferred roles mapping (explicit intent mapping)
+    SECTION_ROLE_MAP: dict[str, list[str]] = {
+        "intro": ["establishing", "detail"],
+        "verse": ["establishing", "detail", "reaction"],
+        "chorus": ["action", "reaction"],
+        "bridge": ["reaction", "detail"],
+        "outro": ["detail", "establishing", "reaction"],
+    }
+
+    # Mismatch penalty when role is not in preferred list
+    SECTION_MISMATCH_PENALTY = 0.15
+
     def section_fit(self, shot: Shot, timeline_position: float) -> float:
         """Score how well a shot matches the current music section's mood.
 
-        Section-level mapping (V3):
+        Section-level mapping (V4):
         - intro  → establishing, detail (scene setting)
-        - verse  → learning/exploration, calm shots
-        - chorus → highlights, action, high-energy moments
-        - bridge → reaction, transition moments
-        - outro  → closing, detail, establishing (farewell)
+        - verse  → establishing, detail, reaction (exploration)
+        - chorus → action, reaction (highlights)
+        - bridge → reaction, detail (transition)
+        - outro  → detail, establishing, reaction (closure)
+
+        Mismatched roles receive a penalty.
         """
         if not self.beat_info or not self.beat_info.sections:
             return 0.5
@@ -118,53 +144,46 @@ class TemplatePlanner(ABC):
         q = shot.quality
         role = shot.shot_role or ""
         highlight = shot.highlight_score
+        preferred = self.SECTION_ROLE_MAP.get(section.label, [])
 
         if section.label == "chorus":
-            # Prefer highlights, high motion, action shots
             score = q.motion_intensity * 0.3 + highlight * 0.3 + (1.0 - q.stability) * 0.1
             if role == "action":
                 score += 0.3
             elif role == "reaction" and highlight >= 0.5:
                 score += 0.2
-            return min(1.0, score)
-
         elif section.label == "verse":
-            # Prefer calm, learning, establishing/detail
             score = q.stability * 0.3 + q.sharpness * 0.2 + q.exposure * 0.1
             if role in ("establishing", "detail"):
                 score += 0.3
             elif role == "reaction":
                 score += 0.15
-            return min(1.0, score)
-
         elif section.label == "intro":
-            # Scene setting: establishing + detail
             score = q.stability * 0.3 + q.exposure * 0.2
             if role == "establishing":
                 score += 0.4
             elif role == "detail":
                 score += 0.3
-            return min(1.0, score)
-
         elif section.label == "outro":
-            # Closing feel: calm, stable, photos welcome
             score = q.stability * 0.3 + q.exposure * 0.2
             if shot.source.is_photo:
                 score += 0.3
             if role in ("detail", "establishing"):
                 score += 0.25
-            return min(1.0, score)
-
         elif section.label == "bridge":
-            # Transition: reaction, moderate energy
             score = q.stability * 0.2 + q.sharpness * 0.2
             if role == "reaction":
                 score += 0.3
             elif role == "detail":
                 score += 0.2
-            return min(1.0, score)
+        else:
+            return 0.5
 
-        return 0.5
+        # Apply mismatch penalty when role conflicts with section intent
+        if role and preferred and role not in preferred:
+            score -= self.SECTION_MISMATCH_PENALTY
+
+        return max(0.0, min(1.0, score))
 
     def rhythm_fit(self, timeline_position: float) -> float:
         """Score how well a position aligns with music beats."""
@@ -292,6 +311,7 @@ class TemplatePlanner(ABC):
         # --- Fill each chapter using event-first selection ---
         for chapter in chapters:
             chapter_duration = target * chapter.ratio
+            chapter_start = current_time
             chapter_end = current_time + chapter_duration
             ch_events = chapter_events[chapter.name]
 
@@ -314,6 +334,12 @@ class TemplatePlanner(ABC):
             # Iterate through chapter's events, picking shots in arc order
             # (establishing → action → reaction → detail)
             arc_order = ["establishing", "action", "reaction", "detail"]
+            arc_phase_budget = {
+                "establishing": 0.15,  # First 15% of chapter
+                "action": 0.40,        # Next 40%
+                "reaction": 0.30,      # Next 30%
+                "detail": 0.15,        # Last 15%
+            }
 
             # Score all candidates from this chapter's events
             ch_candidates: list[tuple[float, Shot, str]] = []  # (score, shot, arc_role)
@@ -336,6 +362,10 @@ class TemplatePlanner(ABC):
 
             # Sort by score
             ch_candidates.sort(key=lambda x: x[0], reverse=True)
+
+            # Track role coverage for this chapter
+            ch_role_counts: dict[str, int] = {}
+            min_role_types = 2  # Minimum distinct roles per chapter
 
             for score, shot, arc_role in ch_candidates:
                 if current_time >= chapter_end:
@@ -393,7 +423,7 @@ class TemplatePlanner(ABC):
                     consecutive_same_role = 0
 
                 # Cross-event jump rate limit (max 1 jump per 4 seconds average)
-                elapsed = current_time - (current_time - chapter_duration * chapter.ratio) if timeline else 0
+                elapsed = current_time - chapter_start
                 if cross_event_count > 0 and elapsed > 0:
                     jump_rate = cross_event_count / max(elapsed, 1.0)
                     if jump_rate > 0.25 and shot.event_id != last_event_id:
@@ -412,6 +442,18 @@ class TemplatePlanner(ABC):
                 # Boost for event's chapter assignment
                 if shot.event_id in ch_events:
                     adjusted_score += 0.05
+
+                # Arc phase preference: boost shots matching current phase
+                ch_progress = (current_time - chapter_start) / max(chapter_duration, 0.1)
+                desired_role = self._arc_role_for_progress(ch_progress, arc_order, arc_phase_budget)
+                if arc_role == desired_role:
+                    adjusted_score += 0.08
+                elif arc_role in arc_order and arc_order.index(arc_role) <= arc_order.index(desired_role):
+                    adjusted_score += 0.03  # Earlier phase still acceptable
+
+                # Role diversity boost: favor underrepresented roles
+                if len(ch_role_counts) < min_role_types and arc_role not in ch_role_counts:
+                    adjusted_score += 0.10  # Encourage diversity early
 
                 if adjusted_score < 0.05:
                     continue
@@ -432,11 +474,23 @@ class TemplatePlanner(ABC):
                 if snapped_start > current_time:
                     current_time = snapped_start
 
-                in_point = shot.start_sec
-                out_point = min(shot.start_sec + clip_dur, shot.end_sec)
+                # Use highlight window if available (prefer best sub-segment)
+                if shot.best_start_sec is not None and shot.best_end_sec is not None:
+                    in_point = shot.best_start_sec
+                    out_point = min(shot.best_start_sec + clip_dur, shot.best_end_sec, shot.end_sec)
+                else:
+                    in_point = shot.start_sec
+                    out_point = min(shot.start_sec + clip_dur, shot.end_sec)
                 actual_dur = out_point - in_point
+                if actual_dur < self.config.clip_duration_sec.min:
+                    # Fall back to shot start if window too short
+                    in_point = shot.start_sec
+                    out_point = min(shot.start_sec + clip_dur, shot.end_sec)
+                    actual_dur = out_point - in_point
 
                 reason = f"event={shot.event_id} arc={arc_role} score={adjusted_score:.3f}"
+                if shot.best_start_sec is not None and shot.best_start_sec != shot.start_sec:
+                    reason += f" window={shot.best_start_sec:.1f}-{shot.best_end_sec:.1f}"
                 clip = TimelineClip(
                     shot=shot,
                     timeline_start=current_time,
@@ -456,6 +510,7 @@ class TemplatePlanner(ABC):
                 used_event_ids.add(shot.event_id)
                 global_source_usage[source_path] = src_uses + 1
                 chapter_source_files.add(source_path)
+                ch_role_counts[shot_role] = ch_role_counts.get(shot_role, 0) + 1
 
                 if is_video:
                     ch_video_used += actual_dur
@@ -526,6 +581,9 @@ class TemplatePlanner(ABC):
             actual_total = current_time
             logger.info("After backfill: %.1fs (target=%ds)", actual_total, target)
 
+        # Enforce chapter-end closure: last clip in each chapter should be reaction/detail
+        self._enforce_chapter_endings(timeline, chapters)
+
         # Add transitions between chapters
         self._add_transitions(timeline, chapters)
 
@@ -544,6 +602,54 @@ class TemplatePlanner(ABC):
             len(global_source_usage),
         )
         return timeline
+
+    @staticmethod
+    def _arc_role_for_progress(
+        progress: float,
+        arc_order: list[str],
+        phase_budget: dict[str, float],
+    ) -> str:
+        """Determine the desired arc role given chapter progress (0-1)."""
+        cumulative = 0.0
+        for role in arc_order:
+            cumulative += phase_budget.get(role, 0.25)
+            if progress <= cumulative:
+                return role
+        return arc_order[-1]
+
+    def _enforce_chapter_endings(
+        self, timeline: list[TimelineClip], chapters: list[Chapter]
+    ) -> None:
+        """Ensure the last clip in each chapter is reaction or detail (closure feel).
+
+        If the last clip is action/establishing, swap it with the nearest
+        reaction/detail clip within the same chapter.
+        """
+        closure_roles = {"reaction", "detail"}
+        chapter_groups: dict[str, list[int]] = {}
+        for i, clip in enumerate(timeline):
+            chapter_groups.setdefault(clip.chapter, []).append(i)
+
+        for ch_name, indices in chapter_groups.items():
+            if not indices:
+                continue
+            last_idx = indices[-1]
+            last_role = timeline[last_idx].shot.shot_role or ""
+            if last_role in closure_roles:
+                continue  # Already good
+
+            # Find nearest reaction/detail in this chapter to swap
+            for j in reversed(indices[:-1]):
+                swap_role = timeline[j].shot.shot_role or ""
+                if swap_role in closure_roles:
+                    # Swap shot content
+                    a, b = timeline[last_idx], timeline[j]
+                    a.shot, b.shot = b.shot, a.shot
+                    a.in_point, b.in_point = b.in_point, a.in_point
+                    a.out_point, b.out_point = b.out_point, a.out_point
+                    a.total_score, b.total_score = b.total_score, a.total_score
+                    a.selection_reason, b.selection_reason = b.selection_reason, a.selection_reason
+                    break
 
     def _add_transitions(
         self, timeline: list[TimelineClip], chapters: list[Chapter]

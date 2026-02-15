@@ -6,6 +6,13 @@ clip_duration_sec:
   max: 8.0
 max_same_event_streak_sec: 15
 narrative_mode: chronological  # chronological | energy_first | hybrid
+shot_detect:
+  min_duration: 0.5
+  max_duration: 8.0
+  histogram_threshold: 0.35
+  optical_flow_threshold: 10.0
+  luminance_threshold: 25.0
+  sample_interval: 3
 music:
   mode: single
   file: ""  # Leave empty to auto-select from input folder

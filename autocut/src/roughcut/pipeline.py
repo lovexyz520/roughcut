@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import csv
 import logging
 import sys
@@ -11,7 +12,7 @@ from pathlib import Path
 import yaml
 
 from roughcut.analyze.beat import analyze_beats
-from roughcut.analyze.highlights import compute_highlight_scores
+from roughcut.analyze.highlights import compute_highlight_scores, compute_highlight_windows
 from roughcut.analyze.quality import score_shot
 from roughcut.analyze.shot_detect import detect_shots, detect_shots_for_photo
 from roughcut.analyze.shot_role import assign_roles
@@ -20,10 +21,16 @@ from roughcut.editor.timeline import build_timeline
 from roughcut.export.draft import render_draft
 from roughcut.export.premiere_xml import export_fcp7_xml
 from roughcut.ingest.scanner import run_ingest
-from roughcut.models import MediaItem, MediaType, OutputConfig, ProjectConfig, Shot
+from roughcut.models import MediaItem, MediaType, OutputConfig, ProjectConfig, Shot, ShotDetectConfig
 from roughcut.planner.events import assign_events, summarize_events
 from roughcut.planner.grammar import apply_grammar
 from roughcut.planner.growth import GrowthPlanner
+from roughcut.planner.preference import (
+    UserProfile,
+    learn_preferences,
+    load_user_profile,
+    save_user_profile,
+)
 from roughcut.planner.travel import TravelPlanner
 from roughcut.report.writer import write_all_reports
 
@@ -37,9 +44,11 @@ def load_config(profile_path: Path) -> ProjectConfig:
     return ProjectConfig.from_dict(data)
 
 
-def _analyze_video(video: MediaItem) -> list[Shot]:
+def _analyze_video(
+    video: MediaItem, shot_detect_config: ShotDetectConfig | None = None
+) -> list[Shot]:
     """Analyze a single video: detect shots and score each. Used by worker pool."""
-    shots = detect_shots(video)
+    shots = detect_shots(video, config=shot_detect_config)
     for shot in shots:
         shot.quality = score_shot(shot)
     return shots
@@ -122,6 +131,7 @@ def _run_analysis(
     videos: list[MediaItem],
     photos: list[MediaItem],
     max_workers: int,
+    shot_detect_config: ShotDetectConfig | None = None,
 ) -> list[Shot]:
     """Run shot detection and quality scoring on all media."""
     all_shots: list[Shot] = []
@@ -129,7 +139,7 @@ def _run_analysis(
     if max_workers > 1:
         with ProcessPoolExecutor(max_workers=max_workers) as pool:
             video_futures = {
-                pool.submit(_analyze_video, v): v for v in videos
+                pool.submit(_analyze_video, v, shot_detect_config): v for v in videos
             }
             photo_futures = {
                 pool.submit(_analyze_photo, p): p for p in photos
@@ -155,7 +165,7 @@ def _run_analysis(
     else:
         for video in videos:
             logger.info("Analyzing video: %s", video.path.name)
-            shots = _analyze_video(video)
+            shots = _analyze_video(video, shot_detect_config)
             all_shots.extend(shots)
 
         for photo in photos:
@@ -252,10 +262,11 @@ def run_pipeline(
 
     # Stage 2: Analyze
     logger.info("=== Stage 2: Analyze (workers=%d) ===", max_workers)
-    all_shots = _run_analysis(videos, photos, max_workers)
+    all_shots = _run_analysis(videos, photos, max_workers, config.shot_detect)
     logger.info("Total shots for selection: %d", len(all_shots))
 
     # Apply favorites/exclude
+    shots_before_filter = list(all_shots)  # Keep copy for preference learning
     fav_names, fav_events = _load_file_list(favorites_path)
     exc_names, exc_events = _load_file_list(exclude_path)
     if fav_names or fav_events:
@@ -287,20 +298,42 @@ def run_pipeline(
     logger.info("=== Highlight Detection ===")
     compute_highlight_scores(all_shots)
 
+    # Highlight windowing (find best sub-segments)
+    logger.info("=== Highlight Windowing ===")
+    compute_highlight_windows(all_shots)
+
     # Beat analysis
     beat_info = None
     if music_path:
         logger.info("Analyzing music beats: %s", music_path.name)
         beat_info = analyze_beats(music_path)
 
+    # User preference learning
+    user_profile: UserProfile | None = None
+    profile_path = output_dir / "user_profile.json"
+    existing_profile = load_user_profile(profile_path)
+    if fav_names or fav_events or exc_names or exc_events:
+        # Build preference samples from favorites/excludes
+        fav_shots = [s for s in all_shots if s.source.path.name in fav_names or s.event_id in fav_events]
+        exc_shots_list = [
+            s for s in shots_before_filter
+            if s.source.path.name in exc_names or s.event_id in exc_events
+        ]
+        user_profile = learn_preferences(all_shots, fav_shots, exc_shots_list)
+        save_user_profile(user_profile, profile_path)
+    elif existing_profile:
+        user_profile = existing_profile
+        logger.info("Using existing user profile (%d samples)", user_profile.sample_count)
+
     # Stage 3: Plan
     logger.info("=== Stage 3: Plan ===")
     if config.project_type == "travel":
-        planner = TravelPlanner(config, beat_info)
+        planner = TravelPlanner(config, beat_info, user_profile)
     else:
-        planner = GrowthPlanner(config, beat_info)
+        planner = GrowthPlanner(config, beat_info, user_profile)
 
     planned_clips = planner.plan(all_shots)
+    pre_grammar_clips = copy.deepcopy(planned_clips)
 
     # Grammar engine: apply editing grammar rules
     logger.info("=== Grammar Engine ===")
@@ -326,7 +359,16 @@ def run_pipeline(
 
     # Stage 6: Report
     logger.info("=== Stage 6: Report ===")
-    write_all_reports(timeline, all_shots, output_dir, beat_info)
+    write_all_reports(
+        timeline=timeline,
+        all_shots=all_shots,
+        output_dir=output_dir,
+        beat_info=beat_info,
+        grammar_report=grammar_report,
+        pre_grammar_clips=pre_grammar_clips,
+        target_duration_sec=config.target_duration_sec,
+        music_path=music_path,
+    )
 
     logger.info("=== Pipeline complete ===")
     logger.info("Output directory: %s", output_dir)

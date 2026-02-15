@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
-import tempfile
+import uuid
 from pathlib import Path
 
 from roughcut.editor.ken_burns import random_ken_burns
@@ -109,10 +110,11 @@ def render_draft(
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="roughcut_") as temp_dir:
-        temp = Path(temp_dir)
-        clip_files: list[Path] = []
+    temp = output_path.parent / "_tmp_render" / f"roughcut_{uuid.uuid4().hex[:8]}"
+    temp.mkdir(parents=True, exist_ok=True)
+    clip_files: list[Path] = []
 
+    try:
         # Render each clip
         for i, clip in enumerate(timeline.clips):
             logger.info("Rendering clip %d/%d: %s", i + 1, len(timeline.clips), clip.shot.source.path.name)
@@ -132,7 +134,8 @@ def render_draft(
         concat_file = temp / "concat.txt"
         with open(concat_file, "w") as f:
             for cf in clip_files:
-                f.write(f"file '{cf}'\n")
+                safe = cf.resolve().as_posix().replace("'", r"'\''")
+                f.write(f"file '{safe}'\n")
 
         # Concat all clips — re-encode to ensure uniform format
         concat_output = temp / "concat.mp4"
@@ -181,5 +184,7 @@ def render_draft(
             logger.error("Final render failed: %s", result.stderr.decode(errors="replace")[:500])
         else:
             logger.info("Draft rendered: %s", output_path)
+    finally:
+        shutil.rmtree(temp, ignore_errors=True)
 
     return output_path

@@ -87,6 +87,10 @@ class Shot:
     shot_role: str = ""      # Assigned by shot_role classifier
     highlight_score: float = 0.0    # 0-1, higher = more memorable moment
     highlight_reason: str = ""       # Why this is a highlight
+    # Highlight window: best sub-segment within this shot
+    best_start_sec: float | None = None  # None = use start_sec
+    best_end_sec: float | None = None    # None = use end_sec
+    window_score: float = 0.0            # Score of the best window
 
     @property
     def duration_sec(self) -> float:
@@ -173,6 +177,17 @@ class Chapter:
 
 
 @dataclass
+class ShotDetectConfig:
+    """Shot detection parameters."""
+    min_duration: float = 0.5   # Minimum shot duration (seconds)
+    max_duration: float = 8.0   # Force-split shots longer than this
+    histogram_threshold: float = 0.4
+    optical_flow_threshold: float = 12.0
+    luminance_threshold: float = 30.0
+    sample_interval: int = 3    # Process every Nth frame
+
+
+@dataclass
 class ClipDurationConfig:
     min: float = 1.5
     max: float = 6.0
@@ -227,6 +242,7 @@ class ProjectConfig:
     video_photo_ratio: list[int] = field(default_factory=lambda: [7, 3])
     clip_duration_sec: ClipDurationConfig = field(default_factory=ClipDurationConfig)
     max_same_event_streak_sec: int = 20
+    shot_detect: ShotDetectConfig = field(default_factory=ShotDetectConfig)
     music: MusicConfig = field(default_factory=MusicConfig)
     rhythm: RhythmConfig = field(default_factory=RhythmConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
@@ -252,6 +268,16 @@ class ProjectConfig:
         config.max_same_event_streak_sec = data.get(
             "max_same_event_streak_sec", config.max_same_event_streak_sec
         )
+        if "shot_detect" in data:
+            sd = data["shot_detect"]
+            config.shot_detect = ShotDetectConfig(
+                min_duration=sd.get("min_duration", 0.5),
+                max_duration=sd.get("max_duration", 8.0),
+                histogram_threshold=sd.get("histogram_threshold", 0.4),
+                optical_flow_threshold=sd.get("optical_flow_threshold", 12.0),
+                luminance_threshold=sd.get("luminance_threshold", 30.0),
+                sample_interval=sd.get("sample_interval", 3),
+            )
         if "music" in data:
             m = data["music"]
             config.music = MusicConfig(

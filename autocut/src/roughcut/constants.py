@@ -24,6 +24,9 @@ STABILITY_JITTER_THRESHOLD = 5.0
 # Shot detection
 HISTOGRAM_DIFF_THRESHOLD = 0.4
 MIN_SHOT_DURATION_SEC = 0.5
+MAX_SHOT_DURATION_SEC = 8.0  # Force-split shots longer than this
+OPTICAL_FLOW_THRESHOLD = 12.0  # Mean pixel displacement for cut detection
+LUMINANCE_JUMP_THRESHOLD = 30.0  # Mean luminance change for cut detection
 
 # Beat alignment
 BEAT_SNAP_TOLERANCE_MS = 120
