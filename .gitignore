@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code local settings
+.claude/
+
+# Project planning docs (not part of source)
+任務清單.md
+規格書.md
+V3_故事感升級任務清單.md
+
+# Media input (large binary files)
+input/
+
+# Generated output
+output/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# OS
+*.lnk

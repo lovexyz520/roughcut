@@ -1,0 +1,25 @@
+﻿project_type: growth
+target_duration_sec: 240
+video_photo_ratio: [7, 3]
+clip_duration_sec:
+  min: 1.5
+  max: 6.0
+max_same_event_streak_sec: 20
+music:
+  mode: single
+  file: "music/love_me_back.mp3"  # Leave empty to auto-select from input folder
+rhythm:
+  snap_to_beat: true
+  tolerance_ms: 120
+diversity:
+  max_consecutive_same_source: 2
+  max_consecutive_same_event: 3
+  max_consecutive_same_role: 2
+  min_event_coverage: 0.3
+  same_source_penalty: 0.15
+  same_angle_penalty: 0.10
+  chapter_repeat_penalty: 0.20
+output:
+  resolution: 1920x1080
+  fps: 30
+  draft_bitrate_mbps: 12

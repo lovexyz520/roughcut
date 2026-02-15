@@ -1,0 +1,140 @@
+"""Event segmentation: group shots by temporal proximity of their source media."""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from roughcut.models import Shot
+
+logger = logging.getLogger(__name__)
+
+# Default gap threshold: if two consecutive files are > 30 min apart, new event
+DEFAULT_EVENT_GAP_SEC = 30 * 60
+
+
+@dataclass
+class EventSummary:
+    """Summary statistics for a single event group."""
+
+    event_id: int
+    shot_count: int = 0
+    total_duration: float = 0.0
+    avg_quality: float = 0.0
+    time_range: str = ""
+
+
+def _parse_creation_time(time_str: str) -> datetime | None:
+    """Parse creation_time from ffprobe metadata."""
+    if not time_str:
+        return None
+    # Common formats from ffprobe / Apple QuickTime
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+    ):
+        try:
+            return datetime.strptime(time_str, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def assign_events(
+    shots: list[Shot],
+    gap_threshold_sec: float = DEFAULT_EVENT_GAP_SEC,
+) -> list[Shot]:
+    """Assign event_id to each shot based on source creation time continuity.
+
+    Shots from the same source file share an event. Events are split when
+    the time gap between consecutive sources exceeds gap_threshold_sec.
+
+    Args:
+        shots: All shots (will be modified in-place).
+        gap_threshold_sec: Max gap in seconds before starting a new event.
+
+    Returns:
+        The same list with event_id assigned.
+    """
+    if not shots:
+        return shots
+
+    # Collect unique sources, sorted by creation time
+    source_times: dict[str, datetime | None] = {}
+    for shot in shots:
+        key = str(shot.source.path)
+        if key not in source_times:
+            source_times[key] = _parse_creation_time(shot.source.creation_time)
+
+    # Sort sources by creation time (None last)
+    sorted_sources = sorted(
+        source_times.items(),
+        key=lambda x: (x[1] is None, x[1] or datetime.min),
+    )
+
+    # Assign event IDs based on time gaps
+    source_to_event: dict[str, int] = {}
+    current_event = 0
+    prev_time: datetime | None = None
+
+    for source_key, creation_time in sorted_sources:
+        if creation_time is not None and prev_time is not None:
+            gap = (creation_time - prev_time).total_seconds()
+            if gap > gap_threshold_sec:
+                current_event += 1
+        elif prev_time is None and creation_time is not None:
+            pass  # First source with valid time
+        elif creation_time is None and prev_time is not None:
+            current_event += 1  # Unknown time = new event
+
+        source_to_event[source_key] = current_event
+        if creation_time is not None:
+            prev_time = creation_time
+
+    # Assign to shots
+    for shot in shots:
+        key = str(shot.source.path)
+        shot.event_id = source_to_event.get(key, 0)
+
+    event_count = current_event + 1
+    logger.info("Assigned %d events across %d shots", event_count, len(shots))
+    return shots
+
+
+def summarize_events(shots: list[Shot]) -> list[EventSummary]:
+    """Generate per-event summary statistics."""
+    events: dict[int, list[Shot]] = {}
+    for shot in shots:
+        events.setdefault(shot.event_id, []).append(shot)
+
+    summaries = []
+    for event_id in sorted(events.keys()):
+        event_shots = events[event_id]
+        total_dur = sum(s.duration_sec for s in event_shots)
+        avg_q = sum(s.quality.overall for s in event_shots) / len(event_shots)
+
+        # Time range from source creation times
+        times = [
+            _parse_creation_time(s.source.creation_time)
+            for s in event_shots
+            if s.source.creation_time
+        ]
+        times = [t for t in times if t is not None]
+        if times:
+            time_range = f"{min(times).strftime('%H:%M')} - {max(times).strftime('%H:%M')}"
+        else:
+            time_range = "unknown"
+
+        summaries.append(EventSummary(
+            event_id=event_id,
+            shot_count=len(event_shots),
+            total_duration=total_dur,
+            avg_quality=avg_q,
+            time_range=time_range,
+        ))
+
+    return summaries
