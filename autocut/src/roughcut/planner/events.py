@@ -23,6 +23,8 @@ class EventSummary:
     total_duration: float = 0.0
     avg_quality: float = 0.0
     time_range: str = ""
+    emotion_intensity: float = 0.0  # Based on face + motion scores
+    rank_score: float = 0.0  # Overall event ranking score
 
 
 def _parse_creation_time(time_str: str) -> datetime | None:
@@ -117,6 +119,12 @@ def summarize_events(shots: list[Shot]) -> list[EventSummary]:
         total_dur = sum(s.duration_sec for s in event_shots)
         avg_q = sum(s.quality.overall for s in event_shots) / len(event_shots)
 
+        # Emotion intensity: average of face + motion
+        emotion = sum(
+            (s.quality.face_score + s.quality.motion_intensity) / 2.0
+            for s in event_shots
+        ) / len(event_shots)
+
         # Time range from source creation times
         times = [
             _parse_creation_time(s.source.creation_time)
@@ -135,6 +143,110 @@ def summarize_events(shots: list[Shot]) -> list[EventSummary]:
             total_duration=total_dur,
             avg_quality=avg_q,
             time_range=time_range,
+            emotion_intensity=emotion,
         ))
 
     return summaries
+
+
+def rank_events(summaries: list[EventSummary]) -> list[EventSummary]:
+    """Rank events by quality, emotion intensity, and shot variety.
+
+    Higher rank_score = more suitable for inclusion.
+    """
+    if not summaries:
+        return summaries
+
+    # Normalize across events
+    max_quality = max(s.avg_quality for s in summaries) or 1.0
+    max_emotion = max(s.emotion_intensity for s in summaries) or 1.0
+    max_shots = max(s.shot_count for s in summaries) or 1
+
+    for s in summaries:
+        norm_q = s.avg_quality / max_quality
+        norm_e = s.emotion_intensity / max_emotion
+        # Shot variety: more shots = more flexibility for arc construction
+        norm_variety = min(s.shot_count / max_shots, 1.0)
+        s.rank_score = norm_q * 0.4 + norm_e * 0.35 + norm_variety * 0.25
+
+    summaries.sort(key=lambda s: s.rank_score, reverse=True)
+    logger.info("Event ranking: %s", [(s.event_id, f"{s.rank_score:.2f}") for s in summaries])
+    return summaries
+
+
+def get_event_shots(shots: list[Shot], event_id: int) -> list[Shot]:
+    """Return all shots belonging to a specific event."""
+    return [s for s in shots if s.event_id == event_id]
+
+
+def sort_events_chronological(summaries: list[EventSummary]) -> list[EventSummary]:
+    """Sort events by time_range (earliest first) for chronological narrative."""
+    def _time_key(es: EventSummary) -> str:
+        if es.time_range == "unknown":
+            return "99:99"
+        return es.time_range.split(" - ")[0]
+
+    return sorted(summaries, key=_time_key)
+
+
+def sort_events_by_energy(summaries: list[EventSummary]) -> list[EventSummary]:
+    """Sort events by emotion intensity (low→high) for energy-first narrative."""
+    return sorted(summaries, key=lambda s: s.emotion_intensity)
+
+
+def order_events_for_narrative(
+    summaries: list[EventSummary],
+    mode: str = "chronological",
+) -> list[EventSummary]:
+    """Order events based on narrative mode.
+
+    Args:
+        summaries: Ranked event summaries.
+        mode: "chronological" (time order), "energy_first" (low→high energy),
+              or "hybrid" (chronological with energy boost at middle).
+
+    Returns:
+        Ordered event summaries.
+    """
+    if mode == "energy_first":
+        return sort_events_by_energy(summaries)
+
+    if mode == "hybrid":
+        # Chronological order, but move highest-energy event to ~60% position
+        chrono = sort_events_chronological(summaries)
+        if len(chrono) >= 3:
+            # Find highest energy event
+            max_idx = max(range(len(chrono)), key=lambda i: chrono[i].emotion_intensity)
+            peak = chrono.pop(max_idx)
+            insert_pos = int(len(chrono) * 0.6)
+            chrono.insert(insert_pos, peak)
+        return chrono
+
+    # Default: chronological
+    return sort_events_chronological(summaries)
+
+
+def build_event_arc(event_shots: list[Shot]) -> dict[str, list[Shot]]:
+    """Organize shots within an event into an arc structure.
+
+    Returns dict with keys: establishing, action, reaction, detail.
+    Each shot is placed into its best-fitting role bucket.
+    """
+    arc: dict[str, list[Shot]] = {
+        "establishing": [],
+        "action": [],
+        "reaction": [],
+        "detail": [],
+    }
+    for shot in event_shots:
+        role = shot.shot_role or "detail"
+        if role in arc:
+            arc[role].append(shot)
+        else:
+            arc["detail"].append(shot)
+
+    # Sort each bucket by quality (best first)
+    for role in arc:
+        arc[role].sort(key=lambda s: s.quality.overall, reverse=True)
+
+    return arc

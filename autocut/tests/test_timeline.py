@@ -95,6 +95,9 @@ class TestReportWriter:
         assert out.exists()
         data = json.loads(out.read_text("utf-8"))
         assert "summary" in data
+        assert "story_structure" in data
+        assert "chapters" in data["story_structure"]
+        assert "grammar_violations" in data
         assert "selected_clips" in data
         assert "rejected_count" in data
         assert data["rejected_count"] == 2  # 3 shots - 1 selected
@@ -163,3 +166,12 @@ class TestReportWriter:
         assert (tmp_path / "report" / "report.json").exists()
         assert (tmp_path / "report" / "selected_clips.csv").exists()
         assert (tmp_path / "report" / "rejected_clips.csv").exists()
+        assert (tmp_path / "report" / "story_notes.md").exists()
+        assert (tmp_path / "report" / "comparison_v3_v4.json").exists()
+
+        comparison = json.loads(
+            (tmp_path / "report" / "comparison_v3_v4.json").read_text("utf-8")
+        )
+        assert "v3_proxy" in comparison
+        assert "v4" in comparison
+        assert "delta" in comparison

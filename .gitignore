@@ -19,10 +19,8 @@ venv/
 # Claude Code local settings
 .claude/
 
-# Project planning docs (not part of source)
-任務清單.md
-規格書.md
-V3_故事感升級任務清單.md
+# Pytest cache
+.pytest_cache/
 
 # Media input (large binary files)
 input/
