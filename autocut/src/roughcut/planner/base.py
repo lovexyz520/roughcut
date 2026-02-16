@@ -52,6 +52,14 @@ class TemplatePlanner(ABC):
         """Return scoring weights: quality, face, motion, story_fit, rhythm_fit."""
         ...
 
+    def chapter_emotion_ranges(self) -> dict[str, tuple[float, float]]:
+        """Return emotion range (min, max) for each chapter.
+
+        Override in subclasses for template-specific emotion arcs.
+        Default: all chapters accept full range.
+        """
+        return {c.name: (0.0, 1.0) for c in self.chapters()}
+
     def compute_score(
         self,
         shot: Shot,
@@ -88,7 +96,12 @@ class TemplatePlanner(ABC):
             if self.beat_info and self.beat_info.sections:
                 section = self.beat_info.section_at(timeline_position)
                 if section and section.label == "chorus":
-                    highlight_bonus += 0.05
+                    highlight_bonus += 0.25  # Task 2: chorus highlight boost
+                else:
+                    # Slight penalty for reserved highlights outside chorus
+                    source_key = f"{shot.source.path}:{shot.start_sec}"
+                    if hasattr(self, '_chorus_reserved_keys') and source_key in self._chorus_reserved_keys:
+                        highlight_bonus -= 0.10
 
         # Penalties
         penalties = 0.0
@@ -147,17 +160,23 @@ class TemplatePlanner(ABC):
         preferred = self.SECTION_ROLE_MAP.get(section.label, [])
 
         if section.label == "chorus":
-            score = q.motion_intensity * 0.3 + highlight * 0.3 + (1.0 - q.stability) * 0.1
+            score = q.motion_intensity * 0.3 + highlight * 0.4 + (1.0 - q.stability) * 0.1
             if role == "action":
-                score += 0.3
+                score += 0.35
             elif role == "reaction" and highlight >= 0.5:
                 score += 0.2
+            # Extra chorus highlight bonus
+            if highlight >= 0.6:
+                score += 0.15
         elif section.label == "verse":
             score = q.stability * 0.3 + q.sharpness * 0.2 + q.exposure * 0.1
             if role in ("establishing", "detail"):
                 score += 0.3
             elif role == "reaction":
                 score += 0.15
+            # Verse motion penalty: too dynamic shots feel wrong in verse
+            if q.motion_intensity > 0.7:
+                score -= 0.1
         elif section.label == "intro":
             score = q.stability * 0.3 + q.exposure * 0.2
             if role == "establishing":
@@ -229,6 +248,22 @@ class TemplatePlanner(ABC):
             return closest
         return position
 
+    def energy_clip_duration(self, position: float) -> float:
+        """Compute max clip duration based on music energy at position.
+
+        Formula: clip_max = base_max * (1.2 - factor * energy)
+        - energy=0 → clip_max ≈ base_max * 1.2 (verse: longer, breathing)
+        - energy=1 → clip_max ≈ base_max * 0.6 (chorus: shorter, punchy)
+
+        Always clamped to [clip_min, base_max * 1.2].
+        """
+        base_max = self.config.clip_duration_sec.max
+        clip_min = self.config.clip_duration_sec.min
+        factor = self.config.rhythm.energy_clip_factor
+        energy = self.music_energy_at(position)
+        clip_max = base_max * (1.2 - factor * energy)
+        return max(clip_min, min(clip_max, base_max * 1.2))
+
     def is_high_energy(self, position: float) -> bool:
         """Check if a timeline position falls in a high-energy music segment."""
         if not self.beat_info:
@@ -267,6 +302,14 @@ class TemplatePlanner(ABC):
         video_used = 0.0
         photo_used = 0.0
 
+        # --- Chorus highlight reservation ---
+        chorus_reserved, chorus_event_usage = self._reserve_chorus_highlights(shots)
+        logger.info(
+            "Chorus reservation: %d shots reserved across %d chorus sections",
+            sum(len(v) for v in chorus_reserved.values()),
+            len(chorus_reserved),
+        )
+
         # Event ranking and narrative ordering
         event_summaries = summarize_events(shots)
         ranked_events = rank_events(event_summaries)
@@ -283,26 +326,52 @@ class TemplatePlanner(ABC):
         for s in shots:
             event_shots_map.setdefault(s.event_id, []).append(s)
 
-        # Allocate events to chapters proportionally
+        # Allocate events to chapters using emotion-aware matching
         chapter_events: dict[str, list[int]] = {c.name: [] for c in chapters}
         events_per_chapter = max(1, len(ranked_events) // len(chapters))
+        emotion_ranges = self.chapter_emotion_ranges()
 
-        # Distribute top-ranked events across chapters
+        # Compute emotion value per event
+        event_emotions: dict[int, float] = {}
+        for es in ranked_events:
+            event_emotions[es.event_id] = es.emotion_intensity
+
+        # Distribute events: match emotion to chapter range
         assigned_events: set[int] = set()
-        for ci, chapter in enumerate(chapters):
-            for ei, es in enumerate(ranked_events):
-                if es.event_id in assigned_events:
-                    continue
+        for chapter in chapters:
+            emo_min, emo_max = emotion_ranges.get(chapter.name, (0.0, 1.0))
+            # Find events that fit this chapter's emotion range
+            fitting = [
+                es for es in ranked_events
+                if es.event_id not in assigned_events
+                and emo_min <= event_emotions.get(es.event_id, 0.5) <= emo_max
+            ]
+            # If not enough fitting, also consider near-range events
+            if len(fitting) < events_per_chapter:
+                near = [
+                    es for es in ranked_events
+                    if es.event_id not in assigned_events
+                    and es not in fitting
+                ]
+                # Sort by distance to range midpoint
+                mid = (emo_min + emo_max) / 2
+                near.sort(key=lambda es: abs(event_emotions.get(es.event_id, 0.5) - mid))
+                fitting.extend(near)
+
+            for es in fitting[:events_per_chapter]:
                 chapter_events[chapter.name].append(es.event_id)
                 assigned_events.add(es.event_id)
-                if len(chapter_events[chapter.name]) >= events_per_chapter:
-                    break
 
-        # Remaining unassigned events go to chapters with most duration budget
+        # Remaining unassigned events go to chapter with best emotion fit
         for es in ranked_events:
             if es.event_id not in assigned_events:
-                # Find chapter with most remaining capacity
-                best_ch = max(chapters, key=lambda c: c.ratio)
+                emo = event_emotions.get(es.event_id, 0.5)
+                best_ch = min(
+                    chapters,
+                    key=lambda c: abs(
+                        emo - sum(emotion_ranges.get(c.name, (0.0, 1.0))) / 2
+                    ),
+                )
                 chapter_events[best_ch.name].append(es.event_id)
                 assigned_events.add(es.event_id)
 
@@ -376,12 +445,7 @@ class TemplatePlanner(ABC):
                     continue
 
                 remaining = chapter_end - current_time
-                energy = self.music_energy_at(current_time)
-                energy_max = self.config.clip_duration_sec.max
-                if energy > 0.7:
-                    energy_max *= 0.6
-                elif energy > 0.5:
-                    energy_max *= 0.8
+                energy_max = self.energy_clip_duration(current_time)
 
                 clip_dur = min(shot.duration_sec, energy_max, remaining)
                 clip_dur = max(clip_dur, self.config.clip_duration_sec.min)
@@ -519,12 +583,12 @@ class TemplatePlanner(ABC):
                     ch_photo_used += actual_dur
                     photo_used += actual_dur
 
-        # --- Duration backfill: try to reach at least 85% of target ---
+        # --- Duration backfill: try to reach at least 95% of target ---
         actual_total = current_time
-        min_target = target * 0.85
+        min_target = target * 0.95
         if actual_total < min_target:
             logger.info(
-                "Duration backfill: %.1fs < %.1fs (85%% target), attempting to fill gap",
+                "Duration backfill: %.1fs < %.1fs (95%% target), attempting to fill gap",
                 actual_total, min_target,
             )
             # Pass 1: reuse video shots with relaxed diversity (allow used sources)
@@ -580,6 +644,57 @@ class TemplatePlanner(ABC):
 
             actual_total = current_time
             logger.info("After backfill: %.1fs (target=%ds)", actual_total, target)
+
+        # --- Trim pass: remove lowest-score clips if over 105% of target ---
+        max_target = target * 1.05
+        actual_total = current_time
+        if actual_total > max_target and len(timeline) > 2:
+            logger.info(
+                "Trim pass: %.1fs > %.1fs (105%% target), removing lowest-score clips",
+                actual_total, max_target,
+            )
+            # Chapter minimum retention: protect essential chapters
+            chapter_min_ratio = {
+                "opening": 0.60, "highlights": 0.70, "closing": 0.50,
+                "departure": 0.60, "interaction": 0.70, "ending": 0.50,
+                "learning": 0.50, "exploration": 0.50,
+            }
+            # Compute current chapter durations
+            ch_durations: dict[str, float] = {}
+            ch_budgets: dict[str, float] = {}
+            for ch in chapters:
+                ch_clips = [c for c in timeline if c.chapter == ch.name]
+                ch_durations[ch.name] = sum(c.timeline_duration for c in ch_clips)
+                ch_budgets[ch.name] = target * ch.ratio
+
+            while actual_total > max_target and len(timeline) > 2:
+                # Find lowest-score clip that won't violate chapter minimum
+                candidates = []
+                for i, clip in enumerate(timeline):
+                    ch = clip.chapter
+                    min_r = chapter_min_ratio.get(ch, 0.40)
+                    ch_dur = ch_durations.get(ch, 0)
+                    ch_budget = ch_budgets.get(ch, 0)
+                    if ch_dur - clip.timeline_duration >= ch_budget * min_r:
+                        candidates.append((clip.total_score, i))
+                if not candidates:
+                    break
+                candidates.sort()
+                _, remove_idx = candidates[0]
+                removed = timeline.pop(remove_idx)
+                ch_durations[removed.chapter] -= removed.timeline_duration
+                actual_total -= removed.timeline_duration
+
+            # Recalculate timeline positions after trim
+            pos = 0.0
+            for tc in timeline:
+                dur = tc.timeline_end - tc.timeline_start
+                tc.timeline_start = pos
+                tc.timeline_end = pos + dur
+                pos += dur
+            current_time = pos
+            actual_total = current_time
+            logger.info("After trim: %.1fs (target=%ds)", actual_total, target)
 
         # Enforce chapter-end closure: last clip in each chapter should be reaction/detail
         self._enforce_chapter_endings(timeline, chapters)
@@ -654,16 +769,105 @@ class TemplatePlanner(ABC):
     def _add_transitions(
         self, timeline: list[TimelineClip], chapters: list[Chapter]
     ) -> None:
-        """Add fade transitions at chapter boundaries."""
-        if len(timeline) < 2:
+        """Add fade transitions at chapter boundaries and cinematic edges."""
+        if not timeline:
             return
 
-        chapter_names = [c.name for c in chapters]
-        for i in range(1, len(timeline)):
-            prev_chapter = timeline[i - 1].chapter
-            curr_chapter = timeline[i].chapter
-            if prev_chapter != curr_chapter:
-                timeline[i - 1].transition_out = TransitionType.FADE_OUT
-                timeline[i].transition_in = TransitionType.FADE_IN
-                timeline[i - 1].transition_duration = 0.5
-                timeline[i].transition_duration = 0.5
+        if len(timeline) >= 2:
+            # Chapter boundary transitions
+            for i in range(1, len(timeline)):
+                prev_chapter = timeline[i - 1].chapter
+                curr_chapter = timeline[i].chapter
+                if prev_chapter != curr_chapter:
+                    timeline[i - 1].transition_out = TransitionType.FADE_OUT
+                    timeline[i].transition_in = TransitionType.FADE_IN
+                    timeline[i - 1].transition_duration = 0.5
+                    timeline[i].transition_duration = 0.5
+
+        # Cinematic edges: fade from black at start, fade to black at end
+        # Applied last so they always win over chapter boundaries
+        timeline[0].transition_in = TransitionType.FADE_FROM_BLACK
+        timeline[0].transition_duration = max(timeline[0].transition_duration, 1.0)
+        timeline[-1].transition_out = TransitionType.FADE_TO_BLACK
+        timeline[-1].transition_duration = max(timeline[-1].transition_duration, 1.5)
+
+    def _reserve_chorus_highlights(
+        self, shots: list[Shot]
+    ) -> tuple[dict[int, list[Shot]], dict[int, set[int]]]:
+        """Reserve top highlight shots for chorus sections.
+
+        Returns:
+            chorus_reserved: {chorus_index: [reserved shots]}
+            chorus_event_usage: {chorus_index: {event_ids used}}
+        """
+        self._chorus_reserved_keys: set[str] = set()
+
+        if not self.beat_info or not self.beat_info.sections:
+            return {}, {}
+
+        # Find chorus sections
+        chorus_sections = [
+            (i, s) for i, s in enumerate(self.beat_info.sections)
+            if s.label == "chorus"
+        ]
+        if not chorus_sections:
+            return {}, {}
+
+        # Sort all shots by highlight score (descending)
+        highlight_pool = sorted(
+            [s for s in shots if s.highlight_score >= 0.3],
+            key=lambda s: s.highlight_score,
+            reverse=True,
+        )
+
+        chorus_reserved: dict[int, list[Shot]] = {}
+        chorus_event_usage: dict[int, set[int]] = {}
+        used_events_across_chorus: dict[int, set[int]] = {}  # chorus_idx -> events used
+        global_reserved: set[str] = set()
+
+        for ci, (chorus_idx, section) in enumerate(chorus_sections):
+            reserved: list[Shot] = []
+            events_used: set[int] = set()
+            # Collect events used by all previous chorus sections
+            prev_events: set[int] = set()
+            for prev_ci in range(ci):
+                prev_events.update(used_events_across_chorus.get(prev_ci, set()))
+
+            # Pick top highlights, preferring different events from previous chorus
+            max_reserve = max(2, int(section.duration / 3))  # ~1 highlight per 3s
+            for shot in highlight_pool:
+                if len(reserved) >= max_reserve:
+                    break
+                source_key = f"{shot.source.path}:{shot.start_sec}"
+                if source_key in global_reserved:
+                    continue
+                # Cross-chorus diversity: prefer events not used in prior chorus
+                if shot.event_id in prev_events and len(highlight_pool) > max_reserve * 2:
+                    continue
+                reserved.append(shot)
+                events_used.add(shot.event_id)
+                global_reserved.add(source_key)
+
+            # Fallback: if not enough due to event constraints, relax
+            if len(reserved) < max_reserve:
+                for shot in highlight_pool:
+                    if len(reserved) >= max_reserve:
+                        break
+                    source_key = f"{shot.source.path}:{shot.start_sec}"
+                    if source_key in global_reserved:
+                        continue
+                    reserved.append(shot)
+                    events_used.add(shot.event_id)
+                    global_reserved.add(source_key)
+                if len(reserved) < max_reserve:
+                    logger.warning(
+                        "Chorus %d: only %d/%d highlights reserved (insufficient events)",
+                        chorus_idx, len(reserved), max_reserve,
+                    )
+
+            chorus_reserved[chorus_idx] = reserved
+            chorus_event_usage[chorus_idx] = events_used
+            used_events_across_chorus[ci] = events_used
+
+        self._chorus_reserved_keys = global_reserved
+        return chorus_reserved, chorus_event_usage

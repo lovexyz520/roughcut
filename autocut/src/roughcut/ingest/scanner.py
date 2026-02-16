@@ -19,6 +19,22 @@ from roughcut.models import MediaItem, MediaType
 logger = logging.getLogger(__name__)
 
 
+def check_tool_availability() -> dict[str, bool]:
+    """Check if external tools (ffmpeg, exiftool) are available."""
+    tools = {}
+    for tool in ("ffmpeg", "exiftool"):
+        try:
+            subprocess.run(
+                [tool, "-version"],
+                capture_output=True,
+                timeout=10,
+            )
+            tools[tool] = True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            tools[tool] = False
+    return tools
+
+
 def classify_file(path: Path) -> MediaType | None:
     ext = path.suffix.lower()
     if ext in VIDEO_EXTENSIONS:
@@ -164,8 +180,18 @@ def convert_dng_proxy(dng_path: Path, output_dir: Path) -> Path | None:
     return None
 
 
-def scan_directory(input_dir: Path, proxy_dir: Path | None = None) -> list[MediaItem]:
-    """Recursively scan a directory and return classified media items."""
+def scan_directory(
+    input_dir: Path,
+    proxy_dir: Path | None = None,
+    skipped_dng: list[dict] | None = None,
+) -> list[MediaItem]:
+    """Recursively scan a directory and return classified media items.
+
+    Args:
+        input_dir: Directory to scan.
+        proxy_dir: Directory for DNG proxy output.
+        skipped_dng: If provided, appends {"file": name, "reason": ...} for each skipped DNG.
+    """
     items: list[MediaItem] = []
     input_dir = Path(input_dir)
 
@@ -201,6 +227,11 @@ def scan_directory(input_dir: Path, proxy_dir: Path | None = None) -> list[Media
                         item.width = int(s.get("width", 0))
                         item.height = int(s.get("height", 0))
                         break
+            elif skipped_dng is not None:
+                skipped_dng.append({
+                    "file": path.name,
+                    "reason": "all proxy conversion strategies failed",
+                })
 
         items.append(item)
 
@@ -256,10 +287,32 @@ def save_media_index(items: list[MediaItem], output_path: Path) -> None:
     logger.info("Saved media index to %s", output_path)
 
 
-def run_ingest(input_dir: Path, output_dir: Path) -> list[MediaItem]:
-    """Full ingest pipeline: scan, dedup, save index."""
+def run_ingest(
+    input_dir: Path,
+    output_dir: Path,
+) -> tuple[list[MediaItem], list[dict]]:
+    """Full ingest pipeline: scan, dedup, save index.
+
+    Returns:
+        Tuple of (media items, list of skipped DNG records).
+    """
     proxy_dir = output_dir / "proxies"
-    items = scan_directory(input_dir, proxy_dir=proxy_dir)
+    skipped_dng: list[dict] = []
+
+    # Check tool availability
+    tools = check_tool_availability()
+    if not tools.get("ffmpeg"):
+        logger.warning("ffmpeg not available — DNG proxy conversion and video probing may fail")
+    if not tools.get("exiftool"):
+        logger.info("exiftool not available — DNG preview extraction will be skipped")
+
+    items = scan_directory(input_dir, proxy_dir=proxy_dir, skipped_dng=skipped_dng)
     items = deduplicate(items)
     save_media_index(items, output_dir / "media_index.json")
-    return items
+
+    if skipped_dng:
+        logger.warning("Skipped %d DNG files during ingest", len(skipped_dng))
+        for entry in skipped_dng:
+            logger.warning("  DNG skipped: %s — %s", entry["file"], entry["reason"])
+
+    return items, skipped_dng

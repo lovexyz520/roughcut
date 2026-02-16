@@ -237,7 +237,7 @@ def run_pipeline(
 
     # Stage 1: Ingest
     logger.info("=== Stage 1: Ingest ===")
-    items = run_ingest(input_dir, output_dir)
+    items, skipped_dng = run_ingest(input_dir, output_dir)
 
     videos = [i for i in items if i.media_type == MediaType.VIDEO]
     photos = [i for i in items if i.media_type == MediaType.PHOTO]
@@ -368,6 +368,7 @@ def run_pipeline(
         pre_grammar_clips=pre_grammar_clips,
         target_duration_sec=config.target_duration_sec,
         music_path=music_path,
+        skipped_dng=skipped_dng,
     )
 
     logger.info("=== Pipeline complete ===")
@@ -390,7 +391,7 @@ def run_review(
 
     # Ingest
     logger.info("=== Stage 1: Ingest ===")
-    items = run_ingest(input_dir, output_dir)
+    items, _skipped_dng = run_ingest(input_dir, output_dir)
 
     videos = [i for i in items if i.media_type == MediaType.VIDEO]
     photos = [i for i in items if i.media_type == MediaType.PHOTO]

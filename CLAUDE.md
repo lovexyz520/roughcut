@@ -1,7 +1,7 @@
 # Roughcut — 自動剪輯系統規格書
 
-版本：V2.0.0
-日期：2026-02-15
+版本：V2.1.0
+日期：2026-02-16
 
 ## 1. 專案概覽
 
@@ -302,7 +302,7 @@ uv run roughcut review --input <dir> --profile <yaml> --output <dir>
 | `MediaItem` | 單一媒體檔案（含 metadata、proxy 路徑） |
 | `QualityScores` | 品質評分（sharpness, exposure, stability, face_score, motion_intensity） |
 | `Shot` | 鏡頭切分結果（含 event_id, shot_role, highlight_score, best window） |
-| `MusicSection` | 音樂段落（label, start, end, avg_energy） |
+| `MusicSection` | 音樂段落（label, start, end, avg_energy, repeat_index） |
 | `BeatInfo` | 節拍資訊（beat_times, downbeat_times, tempo, sections, energy_curve） |
 | `TimelineClip` | 時間軸上的片段（含轉場、chapter、score、selection_reason） |
 | `Chapter` | 故事章節（name, ratio, description） |
@@ -357,6 +357,26 @@ uv run roughcut review --input <dir> --profile <yaml> --output <dir>
   - 使用者偏好學習（user_profile.json）
   - 全部 140 項測試通過
 
+### V2.1.0（V5 故事節奏優化）
+- **節奏與能量**：
+  - Clip 時長連續跟隨能量曲線（energy_clip_duration）
+  - 高光主動鎖定 Chorus（預留機制 + 跨 chorus 多樣性）
+  - 章節情緒弧線分配（emotion-aware event allocation）
+  - 音樂段落對齊加強（chorus highlight 權重提升、verse 動態懲罰）
+- **電影感與轉場**：
+  - 電影感首尾（FADE_FROM_BLACK / FADE_TO_BLACK）
+  - 語意轉場（時間跳躍、情緒對比、媒體切換）
+  - Grammar 2.0（擴大 swap 搜索、emotion gradient score）
+- **穩定性與報表**：
+  - P0 穩定性（smoke test、logger 抑制、tmp_path 清理）
+  - P0 DNG 可用性追蹤（skipped_dng 報告）
+  - P0 目標片長收斂（95% backfill + 105% trim）
+  - 情緒曲線寫入報表（chapter_energy）
+  - KPI 摘要（total_clips、duration、event_coverage、highlight_rate、beat_alignment_rate）
+- **進階偵測**：
+  - Chorus repeat 指紋偵測（chroma cosine similarity → repeat_index）
+  - 全部 177 項測試通過
+
 ---
 
 ## 11. 測試
@@ -364,7 +384,7 @@ uv run roughcut review --input <dir> --profile <yaml> --output <dir>
 ```bash
 cd autocut
 uv sync --group dev
-uv run pytest tests/ -v      # 140 tests
+uv run pytest tests/ -v      # 177 tests
 uv run pytest tests/ -q      # 快速模式
 ```
 
@@ -382,6 +402,14 @@ uv run pytest tests/ -q      # 快速模式
 - `test_xml.py` — XML 匯出
 - `test_preference_learning.py` — 偏好學習
 - `test_comparison_v4.py` — V4 對比驗證
+- `test_energy_duration.py` — 能量→時長映射
+- `test_smoke.py` — Smoke 測試
+- `test_duration_convergence.py` — 片長收斂
+- `test_chorus_highlight.py` — Chorus 高光鎖定
+- `test_emotion_arc.py` — 情緒弧線分配
+- `test_cinematic_edges.py` — 電影感首尾
+- `test_semantic_transitions.py` — 語意轉場
+- `test_chorus_fingerprint.py` — Chorus 指紋 + KPI 報表
 
 ---
 

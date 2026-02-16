@@ -111,15 +111,30 @@ def _build_clipitem(
 
     # Transitions
     if clip.transition_in != TransitionType.CUT:
-        _add_transition_effect(clipitem, clip.transition_duration, start=True)
+        _add_transition_effect(clipitem, clip.transition_duration, start=True, transition_type=clip.transition_in)
     if clip.transition_out != TransitionType.CUT:
-        _add_transition_effect(clipitem, clip.transition_duration, start=False)
+        _add_transition_effect(clipitem, clip.transition_duration, start=False, transition_type=clip.transition_out)
+
+
+def _transition_effect_name(transition_type: TransitionType) -> tuple[str, str]:
+    """Map TransitionType to Premiere effect name and ID."""
+    if transition_type in (
+        TransitionType.FADE_FROM_BLACK,
+        TransitionType.FADE_TO_BLACK,
+    ):
+        return "Dip to Black", "DipToColorDissolve"
+    if transition_type == TransitionType.CROSS_DISSOLVE:
+        return "Cross Dissolve", "CrossDissolve"
+    return "Cross Dissolve", "CrossDissolve"
 
 
 def _add_transition_effect(
-    parent: ET.Element, duration: float, start: bool
+    parent: ET.Element,
+    duration: float,
+    start: bool,
+    transition_type: TransitionType = TransitionType.CROSS_DISSOLVE,
 ) -> None:
-    """Add a cross-dissolve transition effect."""
+    """Add a transition effect element."""
     dur_frames = _seconds_to_frames(duration)
     transitionitem = ET.SubElement(parent, "transitionitem")
     _add_rate(transitionitem)
@@ -127,9 +142,10 @@ def _add_transition_effect(
     ET.SubElement(transitionitem, "end").text = str(dur_frames)
     ET.SubElement(transitionitem, "alignment").text = "start" if start else "end"
 
+    effect_name, effect_id = _transition_effect_name(transition_type)
     effect = ET.SubElement(transitionitem, "effect")
-    ET.SubElement(effect, "name").text = "Cross Dissolve"
-    ET.SubElement(effect, "effectid").text = "CrossDissolve"
+    ET.SubElement(effect, "name").text = effect_name
+    ET.SubElement(effect, "effectid").text = effect_id
     ET.SubElement(effect, "effecttype").text = "transition"
     ET.SubElement(effect, "mediatype").text = "video"
 

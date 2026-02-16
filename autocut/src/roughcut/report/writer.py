@@ -151,12 +151,81 @@ def _compute_section_role_stats(
     }
 
 
+def _compute_chapter_energy(timeline: Timeline) -> list[dict]:
+    """Compute per-chapter emotion/energy statistics."""
+    chapters = timeline.get_chapters()
+    result = []
+    for ch_name, clips in chapters.items():
+        if not clips:
+            continue
+        emotions = [
+            (c.shot.quality.face_score + c.shot.quality.motion_intensity) / 2.0
+            for c in clips
+        ]
+        highlight_count = sum(1 for c in clips if c.shot.highlight_score >= 0.5)
+        result.append({
+            "chapter": ch_name,
+            "clip_count": len(clips),
+            "highlight_count": highlight_count,
+            "avg_emotion": round(sum(emotions) / len(emotions), 4),
+            "peak_emotion": round(max(emotions), 4),
+        })
+    return result
+
+
+def _compute_kpi_summary(
+    timeline: Timeline,
+    all_shots: list[Shot],
+    beat_info: BeatInfo | None,
+) -> dict:
+    """Compute top-level KPI summary for quick quality assessment."""
+    clips = timeline.clips
+    total_dur = timeline.duration
+    total_clips = len(clips)
+
+    # Event coverage
+    selected_events = {c.shot.event_id for c in clips if c.shot.event_id >= 0}
+    all_events = {s.event_id for s in all_shots if s.event_id >= 0}
+    event_coverage = len(selected_events) / len(all_events) if all_events else 0.0
+
+    # Highlight rate
+    highlights = sum(1 for c in clips if c.shot.highlight_score >= 0.5)
+    highlight_rate = highlights / max(total_clips, 1)
+
+    # Beat alignment
+    beat_aligned = 0
+    if beat_info and beat_info.beat_times and clips:
+        tolerance = 0.12
+        for c in clips:
+            min_dist = min(
+                (abs(c.timeline_start - bt) for bt in beat_info.beat_times),
+                default=float("inf"),
+            )
+            if min_dist <= tolerance:
+                beat_aligned += 1
+    beat_align_rate = beat_aligned / max(total_clips, 1)
+
+    # Unique sources
+    unique_sources = len({str(c.shot.source.path) for c in clips})
+
+    return {
+        "total_clips": total_clips,
+        "total_duration_sec": round(total_dur, 1),
+        "unique_sources": unique_sources,
+        "event_coverage": round(event_coverage, 4),
+        "highlight_count": highlights,
+        "highlight_rate": round(highlight_rate, 4),
+        "beat_alignment_rate": round(beat_align_rate, 4),
+    }
+
+
 def write_report_json(
     timeline: Timeline,
     all_shots: list[Shot],
     output_path: Path,
     beat_info: BeatInfo | None = None,
     grammar_report: GrammarReport | None = None,
+    skipped_dng: list[dict] | None = None,
 ) -> Path:
     """Write a detailed report.json with per-clip scores and timeline info."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -191,8 +260,16 @@ def write_report_json(
         chapters_with_good_coverage / len(role_coverage) if role_coverage else 0.0
     )
 
+    # Chapter energy stats (Task D)
+    chapter_energy = _compute_chapter_energy(timeline)
+
+    # KPI summary (Task G)
+    kpi_summary = _compute_kpi_summary(timeline, all_shots, beat_info)
+
     report = {
+        "kpi_summary": kpi_summary,
         "summary": timeline.summary(),
+        "chapter_energy": chapter_energy,
         "story_structure": story_structure,
         "role_coverage": role_coverage,
         "chapter_role_coverage_rate": round(chapter_role_coverage_rate, 4),
@@ -203,6 +280,8 @@ def write_report_json(
             "missing_breath_points": grammar_report.missing_breath_points if grammar_report else 0,
             "chapter_transitions_fixed": grammar_report.chapter_transitions_fixed if grammar_report else 0,
             "cross_event_jump_violations": grammar_report.cross_event_jump_violations if grammar_report else 0,
+            "semantic_transitions_added": grammar_report.semantic_transitions_added if grammar_report else 0,
+            "emotion_gradient_score": grammar_report.emotion_gradient_score if grammar_report else 0.0,
             "total": grammar_report.total_violations if grammar_report else 0,
             "violations_before": grammar_report.violations_before if grammar_report else 0,
             "violations_after": grammar_report.violations_after if grammar_report else 0,
@@ -221,6 +300,7 @@ def write_report_json(
             }
             for es in event_summaries
         ],
+        "skipped_dng": skipped_dng or [],
         "selected_clips": [],
         "rejected_count": 0,
     }
@@ -472,6 +552,7 @@ def write_all_reports(
     pre_grammar_clips: list[TimelineClip] | None = None,
     target_duration_sec: int | None = None,
     music_path: Path | None = None,
+    skipped_dng: list[dict] | None = None,
 ) -> None:
     """Write all report files."""
     report_dir = output_dir / "report"
@@ -481,6 +562,7 @@ def write_all_reports(
         report_dir / "report.json",
         beat_info,
         grammar_report,
+        skipped_dng=skipped_dng,
     )
     write_selected_csv(timeline, report_dir / "selected_clips.csv")
     write_rejected_csv(all_shots, timeline, report_dir / "rejected_clips.csv")

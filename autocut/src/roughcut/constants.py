@@ -44,6 +44,10 @@ FCP7_NTSC = False
 
 # Logging
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+SUPPRESSED_LOGGERS = [
+    "numba", "librosa", "matplotlib", "PIL", "urllib3",
+    "soundfile", "audioread",
+]
 
 
 # --- Error codes ---

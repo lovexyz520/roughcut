@@ -7,8 +7,14 @@ from pathlib import Path
 
 import typer
 
-from roughcut.constants import LOG_FORMAT
+from roughcut.constants import LOG_FORMAT, SUPPRESSED_LOGGERS
 from roughcut.pipeline import run_pipeline, run_review
+
+
+def _suppress_noisy_loggers() -> None:
+    """Silence noisy third-party loggers."""
+    for name in SUPPRESSED_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 app = typer.Typer(
     name="roughcut",
@@ -32,6 +38,7 @@ def run_cmd(
     """Run the roughcut pipeline on a media directory."""
     log_level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=log_level, format=LOG_FORMAT)
+    _suppress_noisy_loggers()
 
     # Validate inputs
     if not input.exists():
@@ -84,6 +91,7 @@ def review_cmd(
     """
     log_level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=log_level, format=LOG_FORMAT)
+    _suppress_noisy_loggers()
 
     if not input.exists():
         typer.echo(f"Error: Input directory does not exist: {input}", err=True)
