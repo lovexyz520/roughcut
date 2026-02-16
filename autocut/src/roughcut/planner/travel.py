@@ -24,6 +24,14 @@ class TravelPlanner(TemplatePlanner):
             Chapter("ending", 0.10, "Sunset, night scenes, return"),
         ]
 
+    def chapter_emotion_ranges(self) -> dict[str, tuple[float, float]]:
+        return {
+            "departure": (0.1, 0.4),
+            "exploration": (0.3, 0.7),
+            "interaction": (0.5, 1.0),
+            "ending": (0.0, 0.35),
+        }
+
     def score_weights(self) -> dict[str, float]:
         return {
             "quality": 0.25,

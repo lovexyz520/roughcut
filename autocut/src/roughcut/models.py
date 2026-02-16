@@ -18,6 +18,8 @@ class TransitionType(str, Enum):
     FADE_IN = "fade_in"
     FADE_OUT = "fade_out"
     CROSS_DISSOLVE = "cross_dissolve"
+    FADE_FROM_BLACK = "fade_from_black"
+    FADE_TO_BLACK = "fade_to_black"
 
 
 @dataclass
@@ -105,6 +107,7 @@ class MusicSection:
     start: float         # seconds
     end: float           # seconds
     avg_energy: float = 0.0  # 0-1 normalized energy level
+    repeat_index: int = 0    # 0-based index within repeated chorus group
 
     @property
     def duration(self) -> float:
@@ -203,6 +206,7 @@ class MusicConfig:
 class RhythmConfig:
     snap_to_beat: bool = True
     tolerance_ms: int = 120
+    energy_clip_factor: float = 0.6  # How strongly energy affects clip duration
 
 
 @dataclass
@@ -288,6 +292,7 @@ class ProjectConfig:
             config.rhythm = RhythmConfig(
                 snap_to_beat=r.get("snap_to_beat", True),
                 tolerance_ms=r.get("tolerance_ms", 120),
+                energy_clip_factor=r.get("energy_clip_factor", 0.6),
             )
         if "output" in data:
             o = data["output"]

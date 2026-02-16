@@ -50,6 +50,9 @@ def analyze_beats(music_path: Path) -> BeatInfo:
     # Handle tempo being an array
     tempo_val = float(tempo) if np.isscalar(tempo) else float(tempo[0])
 
+    # Detect repeated chorus sections via chroma fingerprinting
+    _assign_chorus_repeat_index(sections, y, sr)
+
     info = BeatInfo(
         beat_times=beat_times,
         downbeat_times=downbeat_times,
@@ -305,3 +308,63 @@ def _assign_labels(sections: list[MusicSection]) -> None:
     for i in range(1, len(sections)):
         if sections[i].label == sections[i - 1].label and sections[i].label in ("verse", "bridge"):
             sections[i].label = "bridge" if sections[i - 1].label == "verse" else "verse"
+
+
+def _assign_chorus_repeat_index(
+    sections: list[MusicSection],
+    y: np.ndarray,
+    sr: int,
+) -> None:
+    """Detect repeated chorus sections using chroma cosine similarity.
+
+    Chorus sections with similarity > 0.85 are grouped together,
+    and each is assigned a repeat_index (0, 1, 2...) within its group.
+    """
+    chorus_sections = [s for s in sections if s.label == "chorus"]
+    if len(chorus_sections) < 2:
+        # Single or no chorus: index stays 0
+        return
+
+    # Compute chroma fingerprint for each chorus
+    try:
+        chroma_full = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=512)
+        times = librosa.frames_to_time(np.arange(chroma_full.shape[1]), sr=sr, hop_length=512)
+    except Exception:
+        return
+
+    fingerprints = []
+    for sec in chorus_sections:
+        mask = (times >= sec.start) & (times < sec.end)
+        if mask.any():
+            fp = chroma_full[:, mask].mean(axis=1)
+            norm = np.linalg.norm(fp)
+            fingerprints.append(fp / norm if norm > 0 else fp)
+        else:
+            fingerprints.append(np.zeros(12))
+
+    # Group by cosine similarity > 0.85
+    groups: list[list[int]] = []  # Each group is a list of chorus indices
+    assigned = set()
+    for i in range(len(chorus_sections)):
+        if i in assigned:
+            continue
+        group = [i]
+        assigned.add(i)
+        for j in range(i + 1, len(chorus_sections)):
+            if j in assigned:
+                continue
+            sim = float(np.dot(fingerprints[i], fingerprints[j]))
+            if sim > 0.85:
+                group.append(j)
+                assigned.add(j)
+        groups.append(group)
+
+    # Assign repeat_index within each group
+    for group in groups:
+        for idx, chorus_idx in enumerate(group):
+            chorus_sections[chorus_idx].repeat_index = idx
+
+    logger.info(
+        "Chorus repeat detection: %d chorus sections in %d groups",
+        len(chorus_sections), len(groups),
+    )

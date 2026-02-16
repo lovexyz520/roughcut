@@ -26,6 +26,8 @@ class GrammarReport:
     missing_breath_points: int = 0
     chapter_transitions_fixed: int = 0
     cross_event_jump_violations: int = 0
+    semantic_transitions_added: int = 0
+    emotion_gradient_score: float = 0.0  # 0-1 how well emotion flows
     total_violations: int = 0
     violations_before: int = 0
     violations_after: int = 0
@@ -69,12 +71,19 @@ def apply_grammar(
     # Rule 4: Semantic chapter transitions
     report.chapter_transitions_fixed = _fix_chapter_transitions(clips, report.details)
 
+    # Rule 5: Semantic transitions (time jumps, emotion contrast, media type switch)
+    report.semantic_transitions_added = _apply_semantic_transitions(clips, report.details)
+
     report.total_violations = (
         report.consecutive_same_role
         + report.missing_breath_points
         + report.cross_event_jump_violations
         + report.chapter_transitions_fixed
+        + report.semantic_transitions_added
     )
+
+    # Compute emotion gradient score
+    report.emotion_gradient_score = _compute_emotion_gradient(clips)
 
     # Count violations after fixing
     report.violations_after = count_grammar_violations(clips)
@@ -114,7 +123,7 @@ def _fix_consecutive_roles(
             ))
             # Try to swap clips[i+2] with the next different-role clip
             swapped = False
-            for j in range(i + 3, min(i + 6, len(clips))):
+            for j in range(i + 3, min(i + 8, len(clips))):
                 if clips[j].shot.shot_role != role_a and clips[j].chapter == clips[i + 2].chapter:
                     _swap_clip_content(clips[i + 2], clips[j])
                     swapped = True
@@ -226,6 +235,82 @@ def _fix_chapter_transitions(
     return fixed
 
 
+def _apply_semantic_transitions(
+    clips: list[TimelineClip], details: list[GrammarViolation]
+) -> int:
+    """Rule 5: Apply context-aware transitions between adjacent clips.
+
+    Rules:
+    - Same event, time jump >30s → cross dissolve (time passing feel)
+    - Emotion contrast >0.5 → fade to/from black (emotion reset)
+    - Photo↔video media switch → cross dissolve (smooth handoff)
+    - Never override existing chapter boundary transitions.
+    """
+    added = 0
+    for i in range(1, len(clips)):
+        prev = clips[i - 1]
+        curr = clips[i]
+
+        # Skip if already has a non-CUT transition (e.g., chapter boundary)
+        if prev.transition_out != TransitionType.CUT:
+            continue
+        if curr.transition_in != TransitionType.CUT:
+            continue
+        # Skip if different chapters (handled by chapter transitions)
+        if prev.chapter != curr.chapter:
+            continue
+
+        # Rule 5a: same event, time jump >30s → cross dissolve
+        if (prev.shot.event_id == curr.shot.event_id
+                and prev.shot.event_id >= 0):
+            time_gap = abs(curr.shot.start_sec - prev.shot.end_sec)
+            if time_gap > 30.0:
+                prev.transition_out = TransitionType.CROSS_DISSOLVE
+                curr.transition_in = TransitionType.CROSS_DISSOLVE
+                prev.transition_duration = 0.5
+                curr.transition_duration = 0.5
+                added += 1
+                details.append(GrammarViolation(
+                    rule="semantic_time_jump",
+                    clip_index=i,
+                    description=f"Time jump {time_gap:.0f}s in event {prev.shot.event_id}",
+                ))
+                continue
+
+        # Rule 5b: emotion contrast >0.5 → fade
+        prev_emo = (prev.shot.quality.face_score + prev.shot.quality.motion_intensity) / 2.0
+        curr_emo = (curr.shot.quality.face_score + curr.shot.quality.motion_intensity) / 2.0
+        if abs(curr_emo - prev_emo) > 0.5:
+            prev.transition_out = TransitionType.FADE_OUT
+            curr.transition_in = TransitionType.FADE_IN
+            prev.transition_duration = 0.4
+            curr.transition_duration = 0.4
+            added += 1
+            details.append(GrammarViolation(
+                rule="semantic_emotion_contrast",
+                clip_index=i,
+                description=f"Emotion contrast {abs(curr_emo - prev_emo):.2f}",
+            ))
+            continue
+
+        # Rule 5c: photo↔video media switch → cross dissolve
+        prev_photo = prev.shot.source.is_photo
+        curr_photo = curr.shot.source.is_photo
+        if prev_photo != curr_photo:
+            prev.transition_out = TransitionType.CROSS_DISSOLVE
+            curr.transition_in = TransitionType.CROSS_DISSOLVE
+            prev.transition_duration = 0.4
+            curr.transition_duration = 0.4
+            added += 1
+            details.append(GrammarViolation(
+                rule="semantic_media_switch",
+                clip_index=i,
+                description=f"Media switch: {'photo→video' if prev_photo else 'video→photo'}",
+            ))
+
+    return added
+
+
 def _swap_clip_content(a: TimelineClip, b: TimelineClip) -> None:
     """Swap the shot content of two clips while keeping their timeline positions."""
     a.shot, b.shot = b.shot, a.shot
@@ -233,6 +318,25 @@ def _swap_clip_content(a: TimelineClip, b: TimelineClip) -> None:
     a.out_point, b.out_point = b.out_point, a.out_point
     a.total_score, b.total_score = b.total_score, a.total_score
     a.selection_reason, b.selection_reason = b.selection_reason, a.selection_reason
+
+
+def _compute_emotion_gradient(clips: list[TimelineClip]) -> float:
+    """Quantify how smoothly the emotion arc flows (0=chaotic, 1=smooth).
+
+    Measures the average clip-to-clip emotion change. Smaller jumps = smoother.
+    A perfect score means gentle transitions between emotion levels.
+    """
+    if len(clips) < 2:
+        return 1.0
+
+    emotions = [
+        (c.shot.quality.face_score + c.shot.quality.motion_intensity) / 2.0
+        for c in clips
+    ]
+    jumps = [abs(emotions[i + 1] - emotions[i]) for i in range(len(emotions) - 1)]
+    avg_jump = sum(jumps) / len(jumps)
+    # Score: 0 jump = 1.0, 0.5+ jump = 0.0
+    return max(0.0, min(1.0, 1.0 - avg_jump * 2.0))
 
 
 def count_grammar_violations(clips: list[TimelineClip]) -> int:

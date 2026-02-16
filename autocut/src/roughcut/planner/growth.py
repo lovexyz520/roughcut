@@ -24,6 +24,14 @@ class GrowthPlanner(TemplatePlanner):
             Chapter("closing", 0.15, "Ending moments and photo review"),
         ]
 
+    def chapter_emotion_ranges(self) -> dict[str, tuple[float, float]]:
+        return {
+            "opening": (0.0, 0.35),
+            "learning": (0.25, 0.65),
+            "highlights": (0.55, 1.0),
+            "closing": (0.1, 0.4),
+        }
+
     def score_weights(self) -> dict[str, float]:
         return {
             "quality": 0.20,
