@@ -88,6 +88,13 @@ class TemplatePlanner(ABC):
             + w.get("section_fit", 0.15) * sec_fit
         )
 
+        # V2.2 semantic signals: real smile, composition, source-audio liveliness
+        sig = getattr(self.config, "signals", None)
+        if sig is not None:
+            total += sig.smile_weight * q.smile_score
+            total += sig.composition_weight * q.composition
+            total += sig.audio_weight * max(q.laughter_score, q.audio_energy * 0.6)
+
         # Highlight bonus: boost in chorus sections or chapter end zones
         highlight_bonus = 0.0
         if shot.highlight_score >= 0.5:
@@ -442,6 +449,10 @@ class TemplatePlanner(ABC):
 
                 source_key = f"{shot.source.path}:{shot.start_sec}"
                 if source_key in used_sources:
+                    continue
+
+                # Skip near-duplicate shots (a better twin was kept)
+                if getattr(shot, "near_dup_of", -1) >= 0:
                     continue
 
                 remaining = chapter_end - current_time

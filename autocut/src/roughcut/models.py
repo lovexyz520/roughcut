@@ -64,6 +64,11 @@ class QualityScores:
     stability: float = 0.0       # 0-1, higher = more stable
     face_score: float = 0.0      # 0-1, higher = more/better faces
     motion_intensity: float = 0.0  # 0-1, higher = more dynamic
+    # V2.2 semantic signals (default 0 = neutral / not measured)
+    smile_score: float = 0.0     # 0-1, real smile/expression intensity (not just face presence)
+    composition: float = 0.0     # 0-1, rule-of-thirds / subject placement / headroom
+    audio_energy: float = 0.0    # 0-1, source-audio loudness/voice energy
+    laughter_score: float = 0.0  # 0-1, likelihood of laughter/excitement in source audio
 
     @property
     def overall(self) -> float:
@@ -74,6 +79,16 @@ class QualityScores:
             + self.face_score * 0.2
             + self.motion_intensity * 0.2
         )
+
+    @property
+    def emotion(self) -> float:
+        """Semantic emotion proxy: driven by real smile + audio, falling back to
+        face+motion when semantic signals are absent (backward compatible)."""
+        semantic = max(self.smile_score, self.laughter_score, self.audio_energy * 0.7)
+        if semantic > 0.0:
+            return min(1.0, semantic * 0.7 + self.face_score * 0.2 + self.motion_intensity * 0.1)
+        # Fallback to the legacy (face+motion)/2 proxy
+        return (self.face_score + self.motion_intensity) / 2.0
 
 
 @dataclass
@@ -93,6 +108,11 @@ class Shot:
     best_start_sec: float | None = None  # None = use start_sec
     best_end_sec: float | None = None    # None = use end_sec
     window_score: float = 0.0            # Score of the best window
+    # V2.2 signals
+    camera_motion: str = "static"        # static | pan | tilt | zoom | shake
+    color_temp: float = 0.5              # 0=cool/blue, 1=warm/orange (0.5=neutral)
+    phash: int = 0                       # perceptual hash for near-duplicate detection
+    near_dup_of: int = -1                # shot_index of the better duplicate (-1 = unique/kept)
 
     @property
     def duration_sec(self) -> float:
@@ -238,6 +258,23 @@ class DiversityConfig:
 
 
 @dataclass
+class SignalsConfig:
+    """Toggles and weights for V2.2 semantic signals."""
+
+    expression: bool = True       # real smile/expression detection
+    source_audio: bool = True     # source-audio energy/laughter highlight signal
+    composition: bool = True      # rule-of-thirds / headroom scoring
+    camera_motion: bool = True    # camera movement classification
+    color_continuity: bool = True # penalize jarring color-temp jumps
+    dedup: bool = True            # near-duplicate suppression
+    smile_weight: float = 0.15    # planner weight for smile_score
+    composition_weight: float = 0.10  # planner weight for composition
+    audio_weight: float = 0.12    # planner weight for audio energy/laughter
+    color_jump_penalty: float = 0.08  # grammar penalty for large color-temp jumps
+    dedup_threshold: int = 6      # max Hamming distance for pHash to count as duplicate
+
+
+@dataclass
 class ProjectConfig:
     """Project configuration loaded from YAML."""
 
@@ -251,6 +288,7 @@ class ProjectConfig:
     rhythm: RhythmConfig = field(default_factory=RhythmConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     diversity: DiversityConfig = field(default_factory=DiversityConfig)
+    signals: SignalsConfig = field(default_factory=SignalsConfig)
     narrative_mode: str = "chronological"  # chronological | energy_first | hybrid
     seed: int | None = None
 
@@ -311,6 +349,22 @@ class ProjectConfig:
                 same_source_penalty=d.get("same_source_penalty", 0.15),
                 same_angle_penalty=d.get("same_angle_penalty", 0.10),
                 chapter_repeat_penalty=d.get("chapter_repeat_penalty", 0.20),
+            )
+        if "signals" in data:
+            sg = data["signals"]
+            base = SignalsConfig()
+            config.signals = SignalsConfig(
+                expression=sg.get("expression", base.expression),
+                source_audio=sg.get("source_audio", base.source_audio),
+                composition=sg.get("composition", base.composition),
+                camera_motion=sg.get("camera_motion", base.camera_motion),
+                color_continuity=sg.get("color_continuity", base.color_continuity),
+                dedup=sg.get("dedup", base.dedup),
+                smile_weight=sg.get("smile_weight", base.smile_weight),
+                composition_weight=sg.get("composition_weight", base.composition_weight),
+                audio_weight=sg.get("audio_weight", base.audio_weight),
+                color_jump_penalty=sg.get("color_jump_penalty", base.color_jump_penalty),
+                dedup_threshold=sg.get("dedup_threshold", base.dedup_threshold),
             )
         config.narrative_mode = data.get("narrative_mode", config.narrative_mode)
         config.seed = data.get("seed")

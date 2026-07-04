@@ -8,7 +8,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from roughcut.editor.ken_burns import random_ken_burns
+from roughcut.editor.ken_burns import subject_aware_ken_burns
 from roughcut.editor.timeline import Timeline
 from roughcut.models import OutputConfig, TimelineClip, TransitionType
 
@@ -39,8 +39,8 @@ def build_clip_command(
             source_path = clip.shot.source.proxy_path or clip.shot.source.path
         abs_path = _resolve_path(source_path)
 
-        # Photo -> video with Ken Burns zoompan
-        kb = random_ken_burns(clip.timeline_duration)
+        # Photo -> video with subject-aware Ken Burns zoompan
+        kb = subject_aware_ken_burns(abs_path, clip.timeline_duration)
         kb_filter = kb.ffmpeg_filter(w, h)
 
         bitrate = f"{output_config.draft_bitrate_mbps}M"

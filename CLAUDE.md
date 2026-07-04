@@ -1,7 +1,7 @@
 # Roughcut — 自動剪輯系統規格書
 
-版本：V2.1.0
-日期：2026-02-16
+版本：V2.2.0
+日期：2026-07-04
 
 ## 1. 專案概覽
 
@@ -43,9 +43,15 @@ roughcut/
       analyze/             ← 分析模組
         beat.py            ← 節拍/音樂段落分析
         highlights.py      ← 高光偵測
-        quality.py         ← 品質評分
+        quality.py         ← 品質評分（多幀聚合）
         shot_detect.py     ← 鏡頭切分
         shot_role.py       ← 鏡頭角色分類
+        expression.py      ← 真實笑容/表情偵測（V2.2）
+        audio_energy.py    ← 素材音訊分析（笑聲/興奮，V2.2）
+        composition.py     ← 構圖評分（三分法/頭部空間，V2.2）
+        camera_motion.py   ← 相機運鏡分類（pan/tilt/zoom/shake，V2.2）
+        color.py           ← 色溫/色彩連續性（V2.2）
+        dedup.py           ← 近似重複偵測（pHash，V2.2）
       editor/              ← 剪輯模組
         ken_burns.py       ← Ken Burns 照片運鏡
         timeline.py        ← 時間軸組裝
@@ -91,8 +97,16 @@ roughcut/
 
 - **shot_detect.py**：鏡頭切分（histogram diff + optical flow + luminance jump）
 - **quality.py**：品質評分（清晰度、曝光、穩定度、人臉、動態強度）→ `QualityScores`
-- **shot_role.py**：鏡頭角色分類（establishing / action / reaction / detail）
-- **highlights.py**：高光偵測（笑容/互動/注視/動作，chorus 段加分）→ `highlight_score`
+  - V2.2：point metrics 改為**多幀聚合**（取樣幀中的最佳/中位數），不再只看中間幀
+  - V2.2：一次取樣同時計算表情、構圖、色溫、運鏡、pHash
+- **expression.py**（V2.2）：真實笑容/表情偵測（bundled smile cascade + 眼睛驗證）→ `smile_score`
+- **audio_energy.py**（V2.2）：素材本身音軌分析（RMS 響度 + 笑聲/興奮啟發式）→ `audio_energy`, `laughter_score`
+- **composition.py**（V2.2）：構圖評分（三分法主體位置、臉部頭部空間、水平線）→ `composition`
+- **camera_motion.py**（V2.2）：相機運鏡分類（static/pan/tilt/zoom/shake，Farneback 光流）
+- **color.py**（V2.2）：色溫（冷暖）與相鄰鏡頭色彩連續性距離
+- **dedup.py**（V2.2）：事件內近似重複偵測（DCT pHash），連拍只留最佳一顆
+- **shot_role.py**：鏡頭角色分類（establishing / action / reaction / detail，V2.2 納入運鏡與構圖）
+- **highlights.py**：高光偵測（**真實笑容**/笑聲/注視/動作，chorus 段加分）→ `highlight_score`
 - **beat.py**：音樂分析（節拍、段落偵測 intro/verse/chorus/bridge/outro、能量曲線）
 
 ### 3.3 Plan（規劃）
@@ -300,7 +314,8 @@ uv run roughcut review --input <dir> --profile <yaml> --output <dir>
 | 類別 | 用途 |
 |------|------|
 | `MediaItem` | 單一媒體檔案（含 metadata、proxy 路徑） |
-| `QualityScores` | 品質評分（sharpness, exposure, stability, face_score, motion_intensity） |
+| `QualityScores` | 品質評分（sharpness, exposure, stability, face_score, motion_intensity；V2.2 新增 smile_score, composition, audio_energy, laughter_score，及 `emotion` 語意情緒屬性） |
+| `SignalsConfig` | V2.2 語意訊號開關與權重（expression/source_audio/composition/camera_motion/color_continuity/dedup 及各自權重） |
 | `Shot` | 鏡頭切分結果（含 event_id, shot_role, highlight_score, best window） |
 | `MusicSection` | 音樂段落（label, start, end, avg_energy, repeat_index） |
 | `BeatInfo` | 節拍資訊（beat_times, downbeat_times, tempo, sections, energy_curve） |
@@ -377,6 +392,29 @@ uv run roughcut review --input <dir> --profile <yaml> --output <dir>
   - Chorus repeat 指紋偵測（chroma cosine similarity → repeat_index）
   - 全部 177 項測試通過
 
+### V2.2.0（語意訊號升級）
+
+從「純啟發式低階 CV 指標」提升為「輕量語意訊號層」，全部沿用既有 OpenCV/librosa/ffmpeg，**零新增相依套件**。
+
+- **表情與情緒**：
+  - 真實笑容偵測（`expression.py`，bundled smile cascade + 眼睛驗證），取代舊版「有臉即笑容」的假訊號
+  - `QualityScores.emotion` 語意情緒屬性（smile/audio 驅動，並保留 face+motion fallback），貫穿高光、情緒弧線、語意轉場
+- **素材音訊**：
+  - `audio_energy.py` 分析每個鏡頭自身音軌（RMS 響度 + 笑聲/興奮啟發式），笑出聲的片段直接進高光
+- **畫面感**：
+  - 構圖評分（`composition.py`：三分法、頭部空間、水平線）
+  - 相機運鏡分類（`camera_motion.py`：static/pan/tilt/zoom/shake）
+  - 色溫與色彩連續性（`color.py`），相鄰色調突跳自動加溶接
+  - 照片 Ken Burns 改為**主體導向**（推向偵測到的人臉/顯著區）
+- **選片品質**：
+  - 多幀聚合品質評分（不再只看中間幀，抓到「中途才轉頭笑」的瞬間）
+  - 近似重複抑制（`dedup.py`，事件內 DCT pHash），連拍只留最佳一顆
+  - 高光窗口改抓「最佳瞬間」（納入 smile），並修正每幀重建 cascade 的效能問題
+- **設定與報表**：
+  - `SignalsConfig`（`signals:` 區塊）可逐項開關與調權重
+  - `candidates.csv` 新增 smile/composition/audio/camera_motion/color_temp/near_dup 欄位
+- 全部 197 項測試通過（新增 `test_v22_signals.py`）
+
 ---
 
 ## 11. 測試
@@ -384,7 +422,7 @@ uv run roughcut review --input <dir> --profile <yaml> --output <dir>
 ```bash
 cd autocut
 uv sync --group dev
-uv run pytest tests/ -v      # 177 tests
+uv run pytest tests/ -v      # 197 tests
 uv run pytest tests/ -q      # 快速模式
 ```
 
@@ -410,6 +448,7 @@ uv run pytest tests/ -q      # 快速模式
 - `test_cinematic_edges.py` — 電影感首尾
 - `test_semantic_transitions.py` — 語意轉場
 - `test_chorus_fingerprint.py` — Chorus 指紋 + KPI 報表
+- `test_v22_signals.py` — 表情/構圖/運鏡/色彩/去重/情緒/設定（V2.2）
 
 ---
 
@@ -444,4 +483,8 @@ uv sync --group dev
 - 不支援多首音樂接續（僅單首）
 - DNG 轉檔需要 FFmpeg 支援
 - 音樂段落偵測為啟發式方法
-- 鏡頭角色分類基於品質指標推斷，無 AI 語意理解
+- 鏡頭角色分類基於品質指標推斷
+- V2.2 語意訊號（表情、笑聲、構圖、運鏡）為**傳統 CV/DSP 啟發式**，非深度學習模型：
+  - 笑容偵測用 Haar cascade，側臉/遮擋/低光下可能漏判
+  - 笑聲偵測為音訊能量/調變啟發式，非訓練分類器
+  - 無人物身分辨識（無法建立以特定人物為主的敘事線）

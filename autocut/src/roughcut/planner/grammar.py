@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from roughcut.analyze.camera_motion import motion_conflict
+from roughcut.analyze.color import color_distance
 from roughcut.models import TimelineClip, TransitionType
 
 logger = logging.getLogger(__name__)
@@ -277,9 +279,9 @@ def _apply_semantic_transitions(
                 ))
                 continue
 
-        # Rule 5b: emotion contrast >0.5 → fade
-        prev_emo = (prev.shot.quality.face_score + prev.shot.quality.motion_intensity) / 2.0
-        curr_emo = (curr.shot.quality.face_score + curr.shot.quality.motion_intensity) / 2.0
+        # Rule 5b: emotion contrast >0.5 → fade (real smile/audio-driven emotion)
+        prev_emo = prev.shot.quality.emotion
+        curr_emo = curr.shot.quality.emotion
         if abs(curr_emo - prev_emo) > 0.5:
             prev.transition_out = TransitionType.FADE_OUT
             curr.transition_in = TransitionType.FADE_IN
@@ -307,6 +309,27 @@ def _apply_semantic_transitions(
                 clip_index=i,
                 description=f"Media switch: {'photo→video' if prev_photo else 'video→photo'}",
             ))
+            continue
+
+        # Rule 5d: clashing camera moves or a big color-temp jump → cross dissolve
+        # to soften an otherwise jarring hard cut.
+        clash = motion_conflict(prev.shot.camera_motion, curr.shot.camera_motion)
+        color_jump = color_distance(prev.shot.color_temp, curr.shot.color_temp) > 0.4
+        if clash or color_jump:
+            prev.transition_out = TransitionType.CROSS_DISSOLVE
+            curr.transition_in = TransitionType.CROSS_DISSOLVE
+            prev.transition_duration = 0.35
+            curr.transition_duration = 0.35
+            added += 1
+            reason = "camera_motion_clash" if clash else "color_jump"
+            details.append(GrammarViolation(
+                rule=f"semantic_{reason}",
+                clip_index=i,
+                description=(
+                    f"{prev.shot.camera_motion}→{curr.shot.camera_motion}" if clash
+                    else f"color Δ={color_distance(prev.shot.color_temp, curr.shot.color_temp):.2f}"
+                ),
+            ))
 
     return added
 
@@ -329,10 +352,7 @@ def _compute_emotion_gradient(clips: list[TimelineClip]) -> float:
     if len(clips) < 2:
         return 1.0
 
-    emotions = [
-        (c.shot.quality.face_score + c.shot.quality.motion_intensity) / 2.0
-        for c in clips
-    ]
+    emotions = [c.shot.quality.emotion for c in clips]
     jumps = [abs(emotions[i + 1] - emotions[i]) for i in range(len(emotions) - 1)]
     avg_jump = sum(jumps) / len(jumps)
     # Score: 0 jump = 1.0, 0.5+ jump = 0.0

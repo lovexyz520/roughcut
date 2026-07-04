@@ -119,11 +119,9 @@ def summarize_events(shots: list[Shot]) -> list[EventSummary]:
         total_dur = sum(s.duration_sec for s in event_shots)
         avg_q = sum(s.quality.overall for s in event_shots) / len(event_shots)
 
-        # Emotion intensity: average of face + motion
-        emotion = sum(
-            (s.quality.face_score + s.quality.motion_intensity) / 2.0
-            for s in event_shots
-        ) / len(event_shots)
+        # Emotion intensity: real emotion proxy (smile/audio-driven, with a
+        # face+motion fallback baked into QualityScores.emotion)
+        emotion = sum(s.quality.emotion for s in event_shots) / len(event_shots)
 
         # Time range from source creation times
         times = [

@@ -21,7 +21,16 @@ from roughcut.editor.timeline import build_timeline
 from roughcut.export.draft import render_draft
 from roughcut.export.premiere_xml import export_fcp7_xml
 from roughcut.ingest.scanner import run_ingest
-from roughcut.models import MediaItem, MediaType, OutputConfig, ProjectConfig, Shot, ShotDetectConfig
+from roughcut.analyze.dedup import mark_near_duplicates
+from roughcut.models import (
+    MediaItem,
+    MediaType,
+    OutputConfig,
+    ProjectConfig,
+    Shot,
+    ShotDetectConfig,
+    SignalsConfig,
+)
 from roughcut.planner.events import assign_events, summarize_events
 from roughcut.planner.grammar import apply_grammar
 from roughcut.planner.growth import GrowthPlanner
@@ -45,19 +54,21 @@ def load_config(profile_path: Path) -> ProjectConfig:
 
 
 def _analyze_video(
-    video: MediaItem, shot_detect_config: ShotDetectConfig | None = None
+    video: MediaItem,
+    shot_detect_config: ShotDetectConfig | None = None,
+    signals: SignalsConfig | None = None,
 ) -> list[Shot]:
     """Analyze a single video: detect shots and score each. Used by worker pool."""
     shots = detect_shots(video, config=shot_detect_config)
     for shot in shots:
-        shot.quality = score_shot(shot)
+        shot.quality = score_shot(shot, signals)
     return shots
 
 
-def _analyze_photo(photo: MediaItem) -> Shot:
+def _analyze_photo(photo: MediaItem, signals: SignalsConfig | None = None) -> Shot:
     """Analyze a single photo. Used by worker pool."""
     shot = detect_shots_for_photo(photo, DEFAULT_PHOTO_DURATION_SEC)
-    shot.quality = score_shot(shot)
+    shot.quality = score_shot(shot, signals)
     return shot
 
 
@@ -132,6 +143,7 @@ def _run_analysis(
     photos: list[MediaItem],
     max_workers: int,
     shot_detect_config: ShotDetectConfig | None = None,
+    signals: SignalsConfig | None = None,
 ) -> list[Shot]:
     """Run shot detection and quality scoring on all media."""
     all_shots: list[Shot] = []
@@ -139,10 +151,10 @@ def _run_analysis(
     if max_workers > 1:
         with ProcessPoolExecutor(max_workers=max_workers) as pool:
             video_futures = {
-                pool.submit(_analyze_video, v, shot_detect_config): v for v in videos
+                pool.submit(_analyze_video, v, shot_detect_config, signals): v for v in videos
             }
             photo_futures = {
-                pool.submit(_analyze_photo, p): p for p in photos
+                pool.submit(_analyze_photo, p, signals): p for p in photos
             }
 
             for future in as_completed(video_futures):
@@ -165,12 +177,12 @@ def _run_analysis(
     else:
         for video in videos:
             logger.info("Analyzing video: %s", video.path.name)
-            shots = _analyze_video(video, shot_detect_config)
+            shots = _analyze_video(video, shot_detect_config, signals)
             all_shots.extend(shots)
 
         for photo in photos:
             logger.info("Analyzing photo: %s", photo.path.name)
-            shot = _analyze_photo(photo)
+            shot = _analyze_photo(photo, signals)
             all_shots.append(shot)
 
     return all_shots
@@ -262,7 +274,7 @@ def run_pipeline(
 
     # Stage 2: Analyze
     logger.info("=== Stage 2: Analyze (workers=%d) ===", max_workers)
-    all_shots = _run_analysis(videos, photos, max_workers, config.shot_detect)
+    all_shots = _run_analysis(videos, photos, max_workers, config.shot_detect, config.signals)
     logger.info("Total shots for selection: %d", len(all_shots))
 
     # Apply favorites/exclude
@@ -286,6 +298,11 @@ def run_pipeline(
             "  Event %d: %d shots, %.1fs, avg_quality=%.2f, time=%s",
             es.event_id, es.shot_count, es.total_duration, es.avg_quality, es.time_range,
         )
+
+    # Near-duplicate suppression (within events; needs phash from analysis)
+    if config.signals.dedup:
+        logger.info("=== Near-Duplicate Detection ===")
+        mark_near_duplicates(all_shots, config.signals.dedup_threshold)
 
     # Shot role classification
     logger.info("=== Shot Role Classification ===")
@@ -407,6 +424,8 @@ def run_review(
 
     # Event segmentation & roles
     assign_events(all_shots)
+    if config.signals.dedup:
+        mark_near_duplicates(all_shots, config.signals.dedup_threshold)
     role_map = assign_roles(all_shots)
     for shot in all_shots:
         key = f"{shot.source.path}:{shot.start_sec}"
@@ -430,6 +449,8 @@ def run_review(
             "start_sec", "end_sec", "duration",
             "sharpness", "exposure", "stability", "face_score",
             "motion_intensity", "overall_quality",
+            "smile_score", "composition", "audio_energy", "laughter_score",
+            "camera_motion", "color_temp", "near_dup_of",
             "highlight_score", "highlight_reason",
         ])
         for shot in sorted(all_shots, key=lambda s: s.quality.overall, reverse=True):
@@ -448,6 +469,13 @@ def run_review(
                 f"{q.face_score:.4f}",
                 f"{q.motion_intensity:.4f}",
                 f"{q.overall:.4f}",
+                f"{q.smile_score:.4f}",
+                f"{q.composition:.4f}",
+                f"{q.audio_energy:.4f}",
+                f"{q.laughter_score:.4f}",
+                shot.camera_motion,
+                f"{shot.color_temp:.3f}",
+                shot.near_dup_of,
                 f"{shot.highlight_score:.4f}",
                 shot.highlight_reason,
             ])

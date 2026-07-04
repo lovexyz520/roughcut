@@ -27,6 +27,18 @@ diversity:
   same_source_penalty: 0.15
   same_angle_penalty: 0.10
   chapter_repeat_penalty: 0.20
+signals:                    # V2.2 semantic signals (all default on)
+  expression: true          # real smile/expression detection
+  source_audio: true        # laughter/excitement from each clip's own audio
+  composition: true         # rule-of-thirds / headroom (weighted higher for scenery)
+  camera_motion: true       # pan/tilt/zoom/shake classification
+  color_continuity: true    # smooth jarring warm/cool jumps
+  dedup: true               # suppress near-duplicate bursts
+  smile_weight: 0.12
+  composition_weight: 0.16  # travel: framing/scenery matters more
+  audio_weight: 0.10
+  color_jump_penalty: 0.08
+  dedup_threshold: 6
 output:
   resolution: 1920x1080
   fps: 30

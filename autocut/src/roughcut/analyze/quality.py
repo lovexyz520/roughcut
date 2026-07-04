@@ -7,7 +7,13 @@ import logging
 import cv2
 import numpy as np
 
-from roughcut.models import MediaItem, QualityScores, Shot
+from roughcut.analyze.audio_energy import analyze_source_audio
+from roughcut.analyze.camera_motion import classify_camera_motion
+from roughcut.analyze.color import measure_color_temp_multi
+from roughcut.analyze.composition import measure_composition, measure_composition_multi
+from roughcut.analyze.dedup import compute_phash
+from roughcut.analyze.expression import measure_smile, measure_smile_multi
+from roughcut.models import MediaItem, QualityScores, Shot, SignalsConfig
 
 logger = logging.getLogger(__name__)
 
@@ -149,11 +155,29 @@ def sample_frames(
     return frames
 
 
-def score_shot(shot: Shot) -> QualityScores:
-    """Compute quality scores for a video shot."""
-    if shot.source.is_photo:
-        return score_photo(shot)
+def _top_half_mean(values: list[float]) -> float:
+    """Mean of the better half of the values (rewards the shot's best moment
+    without letting a single stray frame dominate)."""
+    if not values:
+        return 0.0
+    ordered = sorted(values, reverse=True)
+    half = ordered[: max(1, len(ordered) // 2)]
+    return float(np.mean(half))
 
+
+def score_shot(shot: Shot, signals: SignalsConfig | None = None) -> QualityScores:
+    """Compute quality scores for a video shot and populate its V2.2 signals.
+
+    Point metrics are aggregated across *all* sampled frames instead of trusting
+    a single middle frame — a shot where someone turns and smiles at second 3 no
+    longer gets judged by a bland frame at second 1.5. Also populates the shot's
+    camera_motion, color_temp and phash fields in place (returned as part of the
+    shots list by the worker).
+    """
+    if shot.source.is_photo:
+        return score_photo(shot, signals)
+
+    signals = signals or SignalsConfig()
     frames = sample_frames(
         str(shot.source.path), shot.start_sec, shot.end_sec
     )
@@ -161,30 +185,65 @@ def score_shot(shot: Shot) -> QualityScores:
         logger.warning("No frames sampled for shot in %s", shot.source.path.name)
         return QualityScores()
 
-    # Use middle frame for point metrics
     mid_frame = frames[len(frames) // 2]
 
-    return QualityScores(
-        sharpness=measure_sharpness(mid_frame),
-        exposure=measure_exposure(mid_frame),
+    # Aggregate point metrics across frames.
+    sharp = _top_half_mean([measure_sharpness(f) for f in frames])
+    expo = float(np.median([measure_exposure(f) for f in frames]))
+    face = max(detect_faces(f) for f in frames)  # peak: catch the moment
+
+    q = QualityScores(
+        sharpness=sharp,
+        exposure=expo,
         stability=measure_stability(frames),
-        face_score=detect_faces(mid_frame),
+        face_score=face,
         motion_intensity=measure_motion_intensity(frames),
     )
 
+    # --- V2.2 semantic signals ---
+    if signals.expression and face > 0.0:
+        q.smile_score = measure_smile_multi(frames)
+    if signals.composition:
+        q.composition = measure_composition_multi(frames)
+    if signals.source_audio:
+        q.audio_energy, q.laughter_score = analyze_source_audio(
+            str(shot.source.path), shot.start_sec, shot.end_sec
+        )
+    if signals.camera_motion:
+        shot.camera_motion = classify_camera_motion(frames)
+    if signals.color_continuity:
+        shot.color_temp = measure_color_temp_multi(frames)
+    if signals.dedup:
+        shot.phash = compute_phash(mid_frame)
 
-def score_photo(shot: Shot) -> QualityScores:
-    """Compute quality scores for a photo."""
+    return q
+
+
+def score_photo(shot: Shot, signals: SignalsConfig | None = None) -> QualityScores:
+    """Compute quality scores for a photo and populate its V2.2 signals."""
+    signals = signals or SignalsConfig()
     path = shot.source.proxy_path or shot.source.path
     frame = cv2.imread(str(path))
     if frame is None:
         logger.warning("Cannot read photo: %s", path)
         return QualityScores()
 
-    return QualityScores(
+    q = QualityScores(
         sharpness=measure_sharpness(frame),
         exposure=measure_exposure(frame),
         stability=1.0,  # Photos are perfectly stable
         face_score=detect_faces(frame),
         motion_intensity=0.0,
     )
+    if signals.expression and q.face_score > 0.0:
+        q.smile_score = measure_smile(frame)
+    if signals.composition:
+        q.composition = measure_composition(frame)
+    # Photos have no source audio and no camera motion.
+    if signals.color_continuity:
+        from roughcut.analyze.color import measure_color_temp
+        shot.color_temp = measure_color_temp(frame)
+    if signals.dedup:
+        shot.phash = compute_phash(frame)
+
+    return q

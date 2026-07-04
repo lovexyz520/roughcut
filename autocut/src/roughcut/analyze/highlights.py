@@ -7,12 +7,14 @@ import logging
 import cv2
 import numpy as np
 
+from roughcut.analyze.expression import _FACE, measure_smile
 from roughcut.models import Shot
 
 logger = logging.getLogger(__name__)
 
 # Thresholds for highlight detection
-SMILE_THRESHOLD = 0.6       # face_score threshold for "smile/interaction"
+SMILE_THRESHOLD = 0.35      # real smile_score threshold for "smile/interaction"
+LAUGHTER_THRESHOLD = 0.3    # source-audio laughter/excitement threshold
 ACTION_COMPLETE_THRESHOLD = 0.5  # motion that peaks then drops
 GAZE_THRESHOLD = 0.7        # face_score + stability combo
 
@@ -39,12 +41,20 @@ def compute_highlight_scores(shots: list[Shot]) -> None:
         score = 0.0
         reasons: list[str] = []
 
-        # Smile / interaction detection
-        if q.face_score >= SMILE_THRESHOLD:
-            smile_signal = q.face_score * 0.6 + q.motion_intensity * 0.2 + q.exposure * 0.2
+        # Real smile / interaction detection (uses expression model, not just
+        # face presence — this is the signal the old code only pretended to have)
+        if q.smile_score >= SMILE_THRESHOLD:
+            smile_signal = q.smile_score * 0.6 + q.face_score * 0.2 + q.exposure * 0.2
             if smile_signal > score:
                 score = smile_signal
-                reasons.append("interaction")
+                reasons.append("smile")
+
+        # Audible laughter / excitement from the clip's own audio
+        if q.laughter_score >= LAUGHTER_THRESHOLD:
+            laugh_signal = q.laughter_score * 0.7 + q.audio_energy * 0.2 + q.face_score * 0.1
+            if laugh_signal > score:
+                score = laugh_signal
+                reasons.append("laughter")
 
         # Gaze / looking at camera
         if q.face_score >= 0.5 and q.stability >= GAZE_THRESHOLD:
@@ -53,16 +63,23 @@ def compute_highlight_scores(shots: list[Shot]) -> None:
                 score = gaze_signal
                 reasons.append("gaze")
 
-        # Action completion (high motion + sharp = captured a moment)
+        # Action completion (high motion + sharp = captured a moment),
+        # boosted when the audio is lively too.
         if q.motion_intensity >= ACTION_COMPLETE_THRESHOLD and q.sharpness >= 0.5:
-            action_signal = q.motion_intensity * 0.4 + q.sharpness * 0.3 + q.exposure * 0.3
+            action_signal = (
+                q.motion_intensity * 0.35 + q.sharpness * 0.25
+                + q.exposure * 0.2 + q.audio_energy * 0.2
+            )
             if action_signal > score:
                 score = action_signal
                 reasons.append("action_moment")
 
-        # Photo with face = posed moment
+        # Photo with face = posed moment (a real smile makes it a keeper)
         if shot.source.is_photo and q.face_score >= 0.3:
-            photo_signal = q.face_score * 0.5 + q.sharpness * 0.3 + q.exposure * 0.2
+            photo_signal = (
+                q.face_score * 0.5 + q.sharpness * 0.3
+                + q.exposure * 0.2 + q.smile_score * 0.2  # smile is an additive bonus
+            )
             if photo_signal > score:
                 score = photo_signal
                 reasons.append("posed_photo")
@@ -84,7 +101,12 @@ def compute_highlight_scores(shots: list[Shot]) -> None:
 
 
 def _score_frame_quality(frame: np.ndarray) -> float:
-    """Quick per-frame quality score: sharpness + exposure + face presence."""
+    """Per-frame "best moment" score: sharpness + exposure + face + smile.
+
+    Uses the module-level cascade singleton (rebuilding the classifier for every
+    sampled frame was a real hotspot) and folds in a smile term so the chosen
+    sub-window lands on the moment someone actually lights up.
+    """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
     # Sharpness (Laplacian variance)
@@ -100,14 +122,14 @@ def _score_frame_quality(frame: np.ndarray) -> float:
     else:
         exposure = 1.0 - abs(mean_val - 128) / 128.0 * 0.3
 
-    # Face presence (quick Haar cascade)
-    face_cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    )
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(30, 30))
+    # Face presence (singleton cascade)
+    faces = _FACE.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(30, 30))
     face_score = min(len(faces) * 0.3, 1.0)
 
-    return sharpness * 0.35 + exposure * 0.25 + face_score * 0.4
+    # Smile at this instant (only worth computing if a face is present)
+    smile = measure_smile(frame) if len(faces) else 0.0
+
+    return sharpness * 0.3 + exposure * 0.2 + face_score * 0.25 + smile * 0.25
 
 
 def compute_highlight_windows(shots: list[Shot]) -> None:
